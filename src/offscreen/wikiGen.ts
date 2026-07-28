@@ -21,6 +21,38 @@ import type { WikiPage } from '../shared/messages';
 
 marked.setOptions({ gfm: true, breaks: true });
 
+/**
+ * Localizes the wiki's own chrome (search box, nav labels, page counts) —
+ * NOT the document content itself, which is rendered as-is from the source
+ * repo. Mirrors generatewiki's UI_STRINGS EN/FR pattern.
+ */
+const STRINGS = {
+  en: {
+    htmlLang: 'en',
+    searchPlaceholder: 'Search titles and content',
+    searchAria: 'Search wiki',
+    showingAll: 'Showing all pages',
+    showingMatches: (n: number) => `Showing ${n} matching page${n === 1 ? '' : 's'}`,
+    noDocuments: 'No documents to show.',
+    pageCount: (n: number) => `${n} page${n === 1 ? '' : 's'}`,
+    documentsSection: 'Documents',
+    navAria: 'Wiki navigation',
+  },
+  fr: {
+    htmlLang: 'fr',
+    searchPlaceholder: 'Rechercher dans les titres et le contenu',
+    searchAria: 'Rechercher dans le wiki',
+    showingAll: 'Toutes les pages sont affichées',
+    showingMatches: (n: number) => `${n} page${n === 1 ? '' : 's'} correspondante${n === 1 ? '' : 's'} affichée${n === 1 ? '' : 's'}`,
+    noDocuments: 'Aucun document à afficher.',
+    pageCount: (n: number) => `${n} page${n === 1 ? '' : 's'}`,
+    documentsSection: 'Documents',
+    navAria: 'Navigation du wiki',
+  },
+} as const;
+
+export type WikiLang = keyof typeof STRINGS;
+
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -49,7 +81,7 @@ interface WikiSection {
 }
 
 /** Group pages by top-level folder (root/no-path pages land in a single "Documents" section). */
-function buildSections(pages: WikiPage[]): WikiSection[] {
+function buildSections(pages: WikiPage[], lang: WikiLang): WikiSection[] {
   const usedSlugs = new Set<string>();
   const uniqueSlug = (base: string): string => {
     let slug = base;
@@ -64,7 +96,7 @@ function buildSections(pages: WikiPage[]): WikiSection[] {
     const key = sectionKeyOf(p.path);
     let section = grouped.get(key);
     if (!section) {
-      section = { key, label: key || 'Documents', pages: [] };
+      section = { key, label: key || STRINGS[lang].documentsSection, pages: [] };
       grouped.set(key, section);
     }
     const slug = uniqueSlug(slugify(p.path || p.title));
@@ -111,13 +143,14 @@ function contentHtml(sections: WikiSection[]): string {
 }
 
 /** Generate a self-contained HTML wiki from a title + pages, returned as an HTML string. */
-export function buildWikiHtml(title: string, pages: WikiPage[]): string {
-  const sections = buildSections(pages.filter((p) => (p.text ?? '').trim().length > 0));
+export function buildWikiHtml(title: string, pages: WikiPage[], lang: WikiLang = 'en'): string {
+  const ui = STRINGS[lang] ?? STRINGS.en;
+  const sections = buildSections(pages.filter((p) => (p.text ?? '').trim().length > 0), lang);
   const safeTitle = escapeHtml(title.trim() || 'Wiki');
   const pageCount = sections.reduce((n, s) => n + s.pages.length, 0);
 
   return `<!doctype html>
-<html lang="en">
+<html lang="${ui.htmlLang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -196,24 +229,29 @@ export function buildWikiHtml(title: string, pages: WikiPage[]): string {
 <body>
   <header class="topbar">
     <span class="wordmark">${safeTitle}</span>
-    <span class="page-count">${pageCount} page${pageCount === 1 ? '' : 's'}</span>
+    <span class="page-count">${escapeHtml(ui.pageCount(pageCount))}</span>
   </header>
   <div class="shell">
     <aside class="sidebar">
-      <input id="search" class="search" type="search" placeholder="Search titles and content" aria-label="Search wiki">
-      <div id="search-meta" class="search-meta">Showing all pages</div>
-      <nav class="sidebar-nav" aria-label="Wiki navigation">
+      <input id="search" class="search" type="search" placeholder="${escapeHtml(ui.searchPlaceholder)}" aria-label="${escapeHtml(ui.searchAria)}">
+      <div id="search-meta" class="search-meta">${escapeHtml(ui.showingAll)}</div>
+      <nav class="sidebar-nav" aria-label="${escapeHtml(ui.navAria)}">
         ${navHtml(sections)}
       </nav>
     </aside>
     <main class="content">
       <article id="wiki-content" class="article">
-        ${pageCount === 0 ? '<p class="empty-note">No documents to show.</p>' : contentHtml(sections)}
+        ${pageCount === 0 ? `<p class="empty-note">${escapeHtml(ui.noDocuments)}</p>` : contentHtml(sections)}
       </article>
     </main>
   </div>
   <script>
     (() => {
+      const isFr = ${lang === 'fr'};
+      const showingAll = ${JSON.stringify(ui.showingAll)};
+      const showingMatches = (n) => isFr
+        ? \`\${n} page\${n === 1 ? '' : 's'} correspondante\${n === 1 ? '' : 's'} affichée\${n === 1 ? '' : 's'}\`
+        : \`Showing \${n} matching page\${n === 1 ? '' : 's'}\`;
       const search = document.getElementById('search');
       const meta = document.getElementById('search-meta');
       const sections = Array.from(document.querySelectorAll('.page-section'));
@@ -274,7 +312,7 @@ export function buildWikiHtml(title: string, pages: WikiPage[]): string {
           const visibleItems = Array.from(group.querySelectorAll('li')).some((item) => !item.hidden);
           group.hidden = !visibleItems;
         });
-        meta.textContent = query ? \`Showing \${shown} matching page\${shown === 1 ? '' : 's'}\` : 'Showing all pages';
+        meta.textContent = query ? showingMatches(shown) : showingAll;
       };
 
       const setActiveLink = () => {

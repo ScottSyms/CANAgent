@@ -169,7 +169,7 @@ chrome.runtime.onMessage.addListener((message: GenerateWikiRequest, _sender, sen
     try {
       // Lazy import so marked/DOMPurify's wiki-template code only loads when requested.
       const { buildWikiHtml } = await import('./wikiGen');
-      const html = buildWikiHtml(message.title, message.pages);
+      const html = buildWikiHtml(message.title, message.pages, message.lang);
       const dataBase64 = btoa(unescape(encodeURIComponent(html)));
       sendResponse({ ok: true, dataBase64, mimeType: 'text/html' } satisfies GenerateDocumentResponse);
     } catch (e) {

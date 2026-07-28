@@ -95,13 +95,13 @@ export async function generatePresentation(
   return sendOffscreen<GenerateDocumentResponse>(request);
 }
 
-export async function generateWiki(title: string, pages: WikiPage[]): Promise<GenerateDocumentResponse> {
+export async function generateWiki(title: string, pages: WikiPage[], lang?: 'en' | 'fr'): Promise<GenerateDocumentResponse> {
   try {
     await ensureOffscreen();
   } catch (e) {
     return { ok: false, error: `Could not start the wiki generator: ${String(e)}` };
   }
-  const request: GenerateWikiRequest = { target: 'offscreen', type: 'generate_wiki', title, pages };
+  const request: GenerateWikiRequest = { target: 'offscreen', type: 'generate_wiki', title, pages, lang };
   return sendOffscreen<GenerateDocumentResponse>(request);
 }
 

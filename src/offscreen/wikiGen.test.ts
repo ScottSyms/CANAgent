@@ -78,4 +78,30 @@ describe('buildWikiHtml', () => {
     expect(html).not.toContain('<title><b>KB</b></title>');
     expect(html).toContain('&lt;b&gt;KB&lt;/b&gt;');
   });
+
+  it('defaults to English chrome when no lang is given', () => {
+    const html = buildWikiHtml('KB', [page()]);
+    expect(html).toContain('<html lang="en">');
+    expect(html).toContain('placeholder="Search titles and content"');
+  });
+
+  it('localizes the wiki chrome to French without translating document content', () => {
+    const html = buildWikiHtml('KB', [page({ title: 'Hello World', text: 'the body' })], 'fr');
+    expect(html).toContain('<html lang="fr">');
+    expect(html).toContain('placeholder="Rechercher dans les titres et le contenu"');
+    expect(html).toContain('Toutes les pages sont affichées');
+    // Document content itself is not machine-translated — only the chrome is.
+    expect(html).toContain('<h2>Hello World</h2>');
+    expect(html).toContain('<p>the body</p>');
+  });
+
+  it('shows the French empty-state note when there are no documents', () => {
+    const html = buildWikiHtml('Empty KB', [], 'fr');
+    expect(html).toContain('Aucun document à afficher.');
+  });
+
+  it('falls back to the localized "Documents" section label for root/no-path pages', () => {
+    const html = buildWikiHtml('KB', [page({ title: 'Root', text: 'x' })], 'fr');
+    expect(html).toContain('<h2>Documents</h2>'); // identical spelling in both languages
+  });
 });

@@ -846,6 +846,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         properties: {
           repo: { type: 'string', description: 'Repository (knowledge base) name to build the wiki from.' },
           title: { type: 'string', description: 'Wiki title, shown in the header and used for the filename. Defaults to the repo name.' },
+          lang: {
+            type: 'string',
+            enum: ['en', 'fr'],
+            description: "Language for the wiki's own interface (search box, section labels) — not machine translation of the document content, which is rendered as-is. Defaults to 'en'.",
+          },
         },
         required: ['repo'],
       },

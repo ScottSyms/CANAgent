@@ -37,6 +37,7 @@ import {
   repoList,
 } from './offscreenClient';
 import { ingestFiles } from './repoIngest';
+import { buildWikiFromRepo } from './wikiExport';
 import { indexMailbox, type MailSyncProgress } from './mailIngest';
 import {
   indexSharePointLibrary,
@@ -720,6 +721,10 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
   }
   if (request.type === 'products_import') {
     productImport(request.products).then((r) => sendResponse(r));
+    return true;
+  }
+  if (request.type === 'generate_wiki_from_repo') {
+    buildWikiFromRepo(request.repo, request.title, request.lang ?? 'en').then(sendResponse);
     return true;
   }
   if (request.type === 'probe_environment') {

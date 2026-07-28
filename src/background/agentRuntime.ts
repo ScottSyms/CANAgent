@@ -21,7 +21,7 @@
 // testable in principle and decoupled from the panel.
 // =============================================================================
 
-import type { ApprovalContext, WikiPage } from '../shared/messages';
+import type { ApprovalContext } from '../shared/messages';
 import type { CapabilityRegistryEntry } from '../shared/capabilities';
 import { isTrustedForAutoApproval, resolveAuth } from '../shared/capabilities';
 import type { BackgroundEvent } from '../shared/messages';
@@ -75,7 +75,8 @@ import { captureFullPage } from './fullPageCapture';
 import { mcpCallTool, mcpListTools } from './mcpClient';
 import { complete, embedChunks, embedderId, LLM_TIMEOUT_MS, resolveModelForRole, type ContentPart, type LlmMessage, type LlmToolCall } from './llmProvider';
 import { deriveStepBudget, findSimilarLesson, parseLesson, parseReflectionVerdict, parseSummaryArray, relevantLessons, repairToolPairing, withMergedSystemState } from './loopHelpers';
-import { generateDocument, generatePresentation, generateWiki, productSave, repoDeleteDoc, repoDocs, repoDocsText, repoList, repoSearch } from './offscreenClient';
+import { generateDocument, generatePresentation, productSave, repoDeleteDoc, repoDocs, repoList, repoSearch } from './offscreenClient';
+import { buildWikiFromRepo } from './wikiExport';
 import { normalizeSlides } from '../shared/slides';
 import type { SearchHit } from '../shared/vectorSearch';
 import { ingestTab } from './repoIngest';
@@ -3478,26 +3479,24 @@ export class AgentRuntime {
     const repo = String(args.repo ?? '').trim();
     if (!repo) return 'Error: create_wiki needs a repo name.';
     const title = String(args.title ?? '').trim() || repo;
-    const docs = await repoDocsText(repo);
-    if (docs.length === 0) return `Error: repository "${repo}" has no documents (or doesn't exist).`;
-    const pages: WikiPage[] = docs.map((d) => ({ title: d.name, text: d.text, path: d.path, url: d.url }));
-    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'wiki';
-    const result = await generateWiki(title, pages);
-    if (!result.ok || !result.dataBase64) {
-      return `Error: could not generate the wiki. ${result.error ?? ''}`.trim();
+    const lang = args.lang === 'fr' ? 'fr' : 'en';
+    const wiki = await buildWikiFromRepo(repo, title, lang);
+    if (!wiki.ok || !wiki.dataBase64) {
+      return `Error: ${wiki.error ?? 'could not generate the wiki.'}`;
     }
     const fileArtifact: FileArtifact = {
-      filename: `${slug}.html`,
-      mimeType: result.mimeType ?? 'text/html',
-      dataBase64: result.dataBase64,
+      filename: wiki.filename!,
+      mimeType: wiki.mimeType ?? 'text/html',
+      dataBase64: wiki.dataBase64,
     };
+    const pageCount = wiki.pageCount ?? 0;
     this.pushChat({
       role: 'notice',
-      text: `Prepared a wiki from "${repo}" (${pages.length} page${pages.length === 1 ? '' : 's'}). Download it from the card below and open it in a browser.`,
+      text: `Prepared a wiki from "${repo}" (${pageCount} page${pageCount === 1 ? '' : 's'}). Download it from the card below and open it in a browser.`,
       timestamp: new Date().toISOString(),
       fileArtifact,
     });
-    return `Created the wiki "${fileArtifact.filename}" from ${pages.length} document(s) in "${repo}". The user can download it from the card.`;
+    return `Created the wiki "${fileArtifact.filename}" from ${pageCount} document(s) in "${repo}". The user can download it from the card.`;
   }
 
   /**

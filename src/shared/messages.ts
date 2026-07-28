@@ -174,7 +174,11 @@ export type RuntimeRequest =
   | { type: 'product_get'; id: string }
   | { type: 'product_delete'; id: string }
   | { type: 'products_export' }
-  | { type: 'products_import'; products: ExportedProduct[] };
+  | { type: 'products_import'; products: ExportedProduct[] }
+  // Build a downloadable wiki HTML file directly from a knowledge base's
+  // documents (Settings UI action) — see wikiExport.ts. The agent's create_wiki
+  // tool goes through the same helper from agentRuntime.ts, not this message.
+  | { type: 'generate_wiki_from_repo'; repo: string; title?: string; lang?: 'en' | 'fr' };
 
 /** One picked file on its way into a repository (see shared/uploadFile.ts). */
 export interface UploadFile {
@@ -357,6 +361,18 @@ export interface GenerateWikiRequest {
   type: 'generate_wiki';
   title: string;
   pages: WikiPage[];
+  /** Language for the wiki's own chrome (search box, nav labels) — NOT machine translation of the document content. Defaults to 'en'. */
+  lang?: 'en' | 'fr';
+}
+
+/** Result of building a wiki HTML file from a repo's documents (see wikiExport.ts). */
+export interface WikiFileResult {
+  ok: boolean;
+  dataBase64?: string;
+  mimeType?: string;
+  filename?: string;
+  pageCount?: number;
+  error?: string;
 }
 
 /** Requests to the offscreen document's OPFS RAG store. */

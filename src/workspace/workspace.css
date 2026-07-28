@@ -102,6 +102,29 @@ html, body, #app { margin: 0; height: 100%; font-family: -apple-system, BlinkMac
    comment) — a shared-CSS fix is tracked separately. */
 .ws-automations-page .site-form .field { flex: initial; }
 
+/* ===== Knowledge Bases (Settings → RepositoriesSection) =====
+   Sub-tab bar (Knowledge bases / Add files / Folder sync / Microsoft 365) reuses
+   the top-level .ws-nav/.ws-nav-btn pill styling, wrapped in a quiet surface so
+   it reads as a nested control rather than a second top-level nav. The repo
+   list reuses .ws-item-list/.ws-item (see below) with a stacking modifier so
+   a repo's expanded document panel can sit under its header row. */
+.repo-subtabs { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 9px; padding: 3px; margin: 10px 0 12px; }
+.repo-subtabs .ws-nav { gap: 2px; }
+.repo-subtabs .ws-nav-btn { flex: 1; text-align: center; }
+
+.repo-search { display: block; width: 100%; margin: 4px 0 8px; }
+
+.ws-item--stack { flex-direction: column; align-items: stretch; gap: 6px; }
+.repo-item-head { display: flex; align-items: center; gap: 12px; }
+.repo-item-head .repo-toggle { max-width: none; }
+.repo-item-head .repo-toggle:hover { color: var(--accent); }
+
+.repo-docs-panel { margin: 2px 0 4px 22px; padding-left: 10px; border-left: 2px solid var(--border); }
+.ws-item--nested { padding: 6px 8px; gap: 8px; }
+.ws-item--nested .ws-item-title { font-size: 12.5px; font-weight: 500; }
+.ws-item--nested .ws-item-meta { font-size: 11.5px; }
+.ws-file-glyph--sm { width: 22px; height: 22px; border-radius: 6px; }
+
 /* ===== Workspace item rows (Automations tasks/workflows/triggers, Products) =====
    A two-zone row — title+meta column on the left, actions pinned right — sized
    for the 720px console pages rather than the 400px side panel the site-row

@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
-import type { RepoDoc, RepoInfo } from '../shared/messages';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import type { RepoDoc, RepoInfo, WikiFileResult } from '../shared/messages';
+import { saveFile } from './download';
 import {
   filesFromDataTransfer,
   filesFromList,
@@ -55,12 +56,26 @@ function hostOf(url: string): string {
   }
 }
 
+function base64ToBlob(base64: string, mimeType: string): Blob {
+  const bin = atob(base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mimeType });
+}
+
+const FILE_GLYPH = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <path d="M14 2v6h6" />
+  </svg>
+);
+
 type RepoTab = 'repos' | 'upload' | 'folder' | 'm365';
-const REPO_TABS: ReadonlyArray<[RepoTab, string]> = [
-  ['repos', 'repos.tabRepos'],
-  ['upload', 'repos.tabUpload'],
-  ['folder', 'repos.tabFolder'],
-  ['m365', 'repos.tabM365'],
+const REPO_TABS: ReadonlyArray<[RepoTab, string, string]> = [
+  ['repos', 'repos.tabRepos', '📚'],
+  ['upload', 'repos.tabUpload', '📤'],
+  ['folder', 'repos.tabFolder', '📁'],
+  ['m365', 'repos.tabM365', '🏢'],
 ];
 
 export function RepositoriesSection() {
@@ -68,13 +83,16 @@ export function RepositoriesSection() {
   const [subTab, setSubTab] = useState<RepoTab>('repos');
   const [repos, setRepos] = useState<RepoInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [repoFilter, setRepoFilter] = useState('');
   const [expanded, setExpanded] = useState<string | null>(null);
   const [docs, setDocs] = useState<RepoDoc[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
+  const [docFilter, setDocFilter] = useState('');
   const [banner, setBanner] = useState<string | null>(null);
   const [folderBusy, setFolderBusy] = useState<string | null>(null);
   const [folderStatus, setFolderStatus] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [wikiBusy, setWikiBusy] = useState<string | null>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   const load = async () => {
@@ -92,6 +110,16 @@ export function RepositoriesSection() {
     void load();
   }, []);
 
+  const filteredRepos = useMemo(() => {
+    const q = repoFilter.trim().toLowerCase();
+    return q ? repos.filter((r) => r.name.toLowerCase().includes(q)) : repos;
+  }, [repos, repoFilter]);
+
+  const filteredDocs = useMemo(() => {
+    const q = docFilter.trim().toLowerCase();
+    return q ? docs.filter((d) => (d.name || d.url).toLowerCase().includes(q)) : docs;
+  }, [docs, docFilter]);
+
   const loadDocs = async (repo: string) => {
     setDocsLoading(true);
     try {
@@ -107,9 +135,11 @@ export function RepositoriesSection() {
     if (expanded === repo) {
       setExpanded(null);
       setDocs([]);
+      setDocFilter('');
       return;
     }
     setExpanded(repo);
+    setDocFilter('');
     await loadDocs(repo);
   };
 
@@ -126,6 +156,24 @@ export function RepositoriesSection() {
     await chrome.runtime.sendMessage({ type: 'repo_doc_delete', repo, docId });
     await loadDocs(repo);
     void load(); // refresh doc/chunk counts
+  };
+
+  const generateWiki = async (repo: string, lang: 'en' | 'fr') => {
+    setBanner(null);
+    setWikiBusy(`${repo}:${lang}`);
+    try {
+      const res = (await chrome.runtime.sendMessage({ type: 'generate_wiki_from_repo', repo, lang })) as WikiFileResult;
+      if (!res?.ok || !res.dataBase64 || !res.filename) {
+        setBanner(t('repos.wikiError', { msg: res?.error ?? 'unknown error' }));
+        return;
+      }
+      saveFile(base64ToBlob(res.dataBase64, res.mimeType ?? 'text/html'), res.filename);
+      setBanner(t('repos.wikiDone'));
+    } catch (e) {
+      setBanner(t('repos.wikiError', { msg: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setWikiBusy(null);
+    }
   };
 
   // Shared indexer: sync `files` into `repo` (re-fetching existing docs when this
@@ -200,18 +248,20 @@ export function RepositoriesSection() {
       </summary>
       <p class="settings-note">{t('repos.note')}</p>
 
-      <div class="settings-tabs" role="tablist">
-        {REPO_TABS.map(([key, label]) => (
-          <button
-            key={key}
-            role="tab"
-            aria-selected={subTab === key}
-            class={`settings-tab ${subTab === key ? 'is-active' : ''}`}
-            onClick={() => setSubTab(key)}
-          >
-            {t(label)}
-          </button>
-        ))}
+      <div class="repo-subtabs">
+        <div class="ws-nav" role="tablist">
+          {REPO_TABS.map(([key, label, icon]) => (
+            <button
+              key={key}
+              role="tab"
+              aria-selected={subTab === key}
+              class={`ws-nav-btn ${subTab === key ? 'is-active' : ''}`}
+              onClick={() => setSubTab(key)}
+            >
+              <span aria-hidden="true">{icon}</span> {t(label)}
+            </button>
+          ))}
+        </div>
       </div>
 
       {banner && <UploadBanner text={banner} onDismiss={() => setBanner(null)} />}
@@ -270,59 +320,114 @@ export function RepositoriesSection() {
         ) : repos.length === 0 ? (
           <p class="settings-note">{t('repos.empty')}</p>
         ) : (
-          <ul class="sites-list">
-            {repos.map((r) => (
-              <li key={r.name} class="repo-block">
-                <div class="site-row">
-                  <button
-                    class="repo-toggle"
-                    title={expanded === r.name ? t('repos.hideDocs') : t('repos.showDocs')}
-                    onClick={() => toggle(r.name)}
-                  >
-                    {expanded === r.name ? '▾' : '▸'} {r.name}
-                  </button>
-                  <span class="site-desc">
-                    {r.docs} {t('repos.docs')}, {r.chunks} {t('repos.chunks')}
-                  </span>
-                  {r.kind === 'folder' && folderBusy === r.name && <span class="site-desc" title={t('repos.folder.refresh')}>⏳</span>}
-                  <button
-                    class="icon-btn"
-                    aria-label={t('repos.deleteRepo')}
-                    title={t('repos.deleteRepo')}
-                    onClick={() => (r.kind === 'folder' ? removeFolder(r.name) : remove(r.name))}
-                  >
-                    ✕
-                  </button>
-                </div>
-                {expanded === r.name && (
-                  <ul class="repo-docs">
-                    {docsLoading ? (
-                      <li class="settings-note">{t('repos.loading')}</li>
-                    ) : docs.length === 0 ? (
-                      <li class="settings-note">{t('repos.noDocs')}</li>
-                    ) : (
-                      docs.map((d) => (
-                        <li key={d.id} class="repo-doc-row" title={d.url}>
-                          <span class="repo-doc-name">{d.name || hostOf(d.url)}</span>
-                          <span class="repo-doc-meta">
-                            {hostOf(d.url)} · {d.chunkCount} {t('repos.chunks')}
-                          </span>
-                          <button
-                            class="icon-btn"
-                            aria-label={t('repos.deleteDoc')}
-                            title={t('repos.deleteDoc')}
-                            onClick={() => removeDoc(r.name, d.id)}
-                          >
-                            ✕
-                          </button>
-                        </li>
-                      ))
+          <>
+            {repos.length > 4 && (
+              <input
+                type="search"
+                class="ws-memory-search repo-search"
+                placeholder={t('repos.searchPlaceholder')}
+                value={repoFilter}
+                onInput={(e) => setRepoFilter((e.target as HTMLInputElement).value)}
+              />
+            )}
+            {filteredRepos.length === 0 ? (
+              <p class="settings-note">{t('repos.noMatches', { q: repoFilter })}</p>
+            ) : (
+              <ul class="ws-item-list">
+                {filteredRepos.map((r) => (
+                  <li key={r.name} class="ws-item ws-item--stack">
+                    <div class="repo-item-head">
+                      <div class="ws-item-main">
+                        <button
+                          class="repo-toggle ws-item-title"
+                          title={expanded === r.name ? t('repos.hideDocs') : t('repos.showDocs')}
+                          onClick={() => toggle(r.name)}
+                        >
+                          <span aria-hidden="true">{expanded === r.name ? '▾' : '▸'}</span> {r.name}
+                        </button>
+                        <span class="ws-item-meta">
+                          {r.docs} {t('repos.docs')}, {r.chunks} {t('repos.chunks')}
+                          {r.kind === 'folder' && folderBusy === r.name ? ` · ${t('repos.folder.refresh')} ⏳` : ''}
+                        </span>
+                      </div>
+                      <div class="ws-item-actions">
+                        <button
+                          class="btn btn-small"
+                          title={t('repos.wikiEnHint')}
+                          disabled={wikiBusy !== null}
+                          onClick={() => void generateWiki(r.name, 'en')}
+                        >
+                          {wikiBusy === `${r.name}:en` ? '…' : t('repos.wikiEn')}
+                        </button>
+                        <button
+                          class="btn btn-small"
+                          title={t('repos.wikiFrHint')}
+                          disabled={wikiBusy !== null}
+                          onClick={() => void generateWiki(r.name, 'fr')}
+                        >
+                          {wikiBusy === `${r.name}:fr` ? '…' : t('repos.wikiFr')}
+                        </button>
+                        <button
+                          class="icon-btn"
+                          aria-label={t('repos.deleteRepo')}
+                          title={t('repos.deleteRepo')}
+                          onClick={() => (r.kind === 'folder' ? removeFolder(r.name) : remove(r.name))}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                    {expanded === r.name && (
+                      <div class="repo-docs-panel">
+                        {docs.length > 6 && (
+                          <input
+                            type="search"
+                            class="ws-memory-search repo-search"
+                            placeholder={t('repos.docSearchPlaceholder')}
+                            value={docFilter}
+                            onInput={(e) => setDocFilter((e.target as HTMLInputElement).value)}
+                          />
+                        )}
+                        {docsLoading ? (
+                          <p class="settings-note">{t('repos.loading')}</p>
+                        ) : docs.length === 0 ? (
+                          <p class="settings-note">{t('repos.noDocs')}</p>
+                        ) : filteredDocs.length === 0 ? (
+                          <p class="settings-note">{t('repos.noDocMatches', { q: docFilter })}</p>
+                        ) : (
+                          <ul class="ws-item-list">
+                            {filteredDocs.map((d) => (
+                              <li key={d.id} class="ws-item ws-item--nested" title={d.url}>
+                                <span class="ws-file-glyph ws-file-glyph--sm" aria-hidden="true">
+                                  {FILE_GLYPH}
+                                </span>
+                                <div class="ws-item-main">
+                                  <span class="ws-item-title">{d.name || hostOf(d.url)}</span>
+                                  <span class="ws-item-meta">
+                                    {hostOf(d.url)} · {d.chunkCount} {t('repos.chunks')}
+                                  </span>
+                                </div>
+                                <div class="ws-item-actions">
+                                  <button
+                                    class="icon-btn"
+                                    aria-label={t('repos.deleteDoc')}
+                                    title={t('repos.deleteDoc')}
+                                    onClick={() => removeDoc(r.name, d.id)}
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
                     )}
-                  </ul>
-                )}
-              </li>
-            ))}
-          </ul>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
         ))}
     </details>
   );
