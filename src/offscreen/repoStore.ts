@@ -125,15 +125,32 @@ async function appendKeywordIndex(
   await writeJson(dir, 'keywordIndex.json', next);
 }
 
-export async function repoAdd(
+export interface RepoAddManyDoc {
+  doc: { name: string; url: string };
+  chunks: string[];
+  vectors: number[][];
+  docExtra?: DocExtra;
+  docId?: string;
+}
+
+/**
+ * Add several documents to a repo in one pass. `repoAdd` (a single document)
+ * delegates here — batching matters because each write reads the *entire*
+ * chunks.json, appends, and rewrites the whole file; calling it once per
+ * document in a loop is O(n^2) total I/O for an n-document ingest. This reads
+ * meta/chunks/keywordIndex once, folds every document in memory, and writes
+ * each OPFS file exactly once regardless of batch size.
+ */
+export async function repoAddMany(
   repo: string,
-  doc: { name: string; url: string },
-  chunks: string[],
-  vectors: number[][],
-  opts: { embedModel?: string; kind?: RepoKind; docExtra?: DocExtra; docId?: string } = {},
-): Promise<{ docId: string; chunkCount: number }> {
-  if (chunks.length === 0 || vectors.length !== chunks.length) {
-    throw new Error('repoAdd: chunk/vector count mismatch.');
+  docs: RepoAddManyDoc[],
+  opts: { embedModel?: string; kind?: RepoKind } = {},
+): Promise<{ docs: Array<{ docId: string; chunkCount: number }>; chunkCount: number }> {
+  if (docs.length === 0) return { docs: [], chunkCount: 0 };
+  for (const d of docs) {
+    if (d.chunks.length === 0 || d.vectors.length !== d.chunks.length) {
+      throw new Error('repoAddMany: chunk/vector count mismatch.');
+    }
   }
   const dir = await repoDir(repo);
   const meta = await readJson<RepoMeta>(dir, 'meta.json', {
@@ -155,43 +172,79 @@ export async function repoAdd(
     }
   }
   if (opts.kind && (!meta.kind || meta.chunkCount === 0)) meta.kind = opts.kind;
-  const normed = vectors.map(normalizeVector);
+
+  const allNormed = docs.map((d) => d.vectors.map(normalizeVector));
   if (meta.dim === 0) {
-    meta.dim = normed[0].length;
+    // First write to an empty repo: calibrate across every doc in the batch
+    // (not just the first) so the scale reflects the whole ingest.
+    meta.dim = allNormed[0][0].length;
     const scale = new Array(meta.dim).fill(0);
-    for (const v of normed) for (let d = 0; d < meta.dim; d++) scale[d] = Math.max(scale[d], Math.abs(v[d]));
+    for (const normed of allNormed) for (const v of normed) for (let d = 0; d < meta.dim; d++) scale[d] = Math.max(scale[d], Math.abs(v[d]));
     meta.perDimScale = scale.map((s) => s || 1);
   }
-  if (normed[0].length !== meta.dim) {
-    throw new Error(`Embedding dimension ${normed[0].length} does not match repo dimension ${meta.dim}.`);
+  for (const normed of allNormed) {
+    if (normed[0].length !== meta.dim) {
+      throw new Error(`Embedding dimension ${normed[0].length} does not match repo dimension ${meta.dim}.`);
+    }
   }
 
-  const packed = new Int8Array(normed.length * meta.dim);
-  normed.forEach((v, i) => packed.set(quantizeVector(v, meta.perDimScale), i * meta.dim));
-  await appendVectors(dir, packed);
+  let packedLen = 0;
+  for (const normed of allNormed) packedLen += normed.length * meta.dim;
+  const packed = new Int8Array(packedLen);
+  let packedOffset = 0;
 
   const allChunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
   const previousChunkCount = allChunks.length;
-  const docId = opts.docId ?? `doc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-  const newChunks = chunks.map((text) => ({ docId, name: doc.name, url: doc.url, text }));
+  const newChunks: ChunkRec[] = [];
+  const results: Array<{ docId: string; chunkCount: number }> = [];
+
+  docs.forEach((d, i) => {
+    const normed = allNormed[i];
+    normed.forEach((v) => {
+      packed.set(quantizeVector(v, meta.perDimScale), packedOffset);
+      packedOffset += meta.dim;
+    });
+    const docId = d.docId ?? `doc-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`;
+    for (const text of d.chunks) newChunks.push({ docId, name: d.doc.name, url: d.doc.url, text });
+    meta.docs.push({
+      id: docId,
+      name: d.doc.name,
+      url: d.doc.url,
+      capturedAt: new Date().toISOString(),
+      chunkStart: meta.chunkCount,
+      chunkCount: d.chunks.length,
+      ...(d.docExtra?.path !== undefined ? { path: d.docExtra.path } : {}),
+      ...(d.docExtra?.mtime !== undefined ? { mtime: d.docExtra.mtime } : {}),
+      ...(d.docExtra?.size !== undefined ? { size: d.docExtra.size } : {}),
+    });
+    meta.chunkCount += d.chunks.length;
+    results.push({ docId, chunkCount: meta.chunkCount });
+  });
+
+  await appendVectors(dir, packed);
   allChunks.push(...newChunks);
   await writeJson(dir, 'chunks.json', allChunks);
   await appendKeywordIndex(dir, previousChunkCount, newChunks, allChunks);
-
-  meta.docs.push({
-    id: docId,
-    name: doc.name,
-    url: doc.url,
-    capturedAt: new Date().toISOString(),
-    chunkStart: meta.chunkCount,
-    chunkCount: chunks.length,
-    ...(opts.docExtra?.path !== undefined ? { path: opts.docExtra.path } : {}),
-    ...(opts.docExtra?.mtime !== undefined ? { mtime: opts.docExtra.mtime } : {}),
-    ...(opts.docExtra?.size !== undefined ? { size: opts.docExtra.size } : {}),
-  });
-  meta.chunkCount += chunks.length;
   await writeJson(dir, 'meta.json', meta);
-  return { docId, chunkCount: meta.chunkCount };
+
+  return { docs: results, chunkCount: meta.chunkCount };
+}
+
+export async function repoAdd(
+  repo: string,
+  doc: { name: string; url: string },
+  chunks: string[],
+  vectors: number[][],
+  opts: { embedModel?: string; kind?: RepoKind; docExtra?: DocExtra; docId?: string } = {},
+): Promise<{ docId: string; chunkCount: number }> {
+  if (chunks.length === 0 || vectors.length !== chunks.length) {
+    throw new Error('repoAdd: chunk/vector count mismatch.');
+  }
+  const { docs: results } = await repoAddMany(repo, [{ doc, chunks, vectors, docExtra: opts.docExtra, docId: opts.docId }], {
+    embedModel: opts.embedModel,
+    kind: opts.kind,
+  });
+  return results[0];
 }
 
 export async function repoSearch(
@@ -329,6 +382,27 @@ export async function repoDocs(repo: string): Promise<DocMeta[]> {
   const dir = await repoDir(repo);
   const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
   return meta?.docs ?? [];
+}
+
+/**
+ * Every document in a repo with its full text reassembled from chunks.json
+ * (chunks are appended contiguously per document, so `chunkStart`/`chunkCount`
+ * from meta.json slice out exactly one document's chunks in original order).
+ * One meta/chunks read for the whole repo — used by wiki generation, which
+ * needs every document's full text at once rather than per-chunk snippets.
+ */
+export async function repoAllDocsText(repo: string): Promise<Array<DocMeta & { text: string }>> {
+  const dir = await repoDir(repo);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) return [];
+  const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
+  return meta.docs.map((d) => ({
+    ...d,
+    text: chunks
+      .slice(d.chunkStart, d.chunkStart + d.chunkCount)
+      .map((c) => c.text)
+      .join('\n\n'),
+  }));
 }
 
 /** Remove one document from a repo, rebuilding vectors.bin + chunks.json + meta. */

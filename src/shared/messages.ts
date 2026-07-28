@@ -243,6 +243,11 @@ export interface RepoDoc {
   size?: number;
 }
 
+/** A repo document with its full text reassembled from chunks — see repoAllDocsText. */
+export interface RepoDocText extends RepoDoc {
+  text: string;
+}
+
 /** Request to the offscreen document to parse a PDF (separate sendMessage channel). */
 export interface ExtractPdfRequest {
   target: 'offscreen';
@@ -335,6 +340,25 @@ export interface GeneratePresentationRequest {
   slides: SlideSpec[];
 }
 
+/** One page of a generated wiki (source doc's title/text, plus optional grouping/link metadata). */
+export interface WikiPage {
+  title: string;
+  /** Markdown or plain text body, rendered client-side in the generated HTML. */
+  text: string;
+  /** Folder-repo relative path — used to group pages into sidebar sections by top-level folder. */
+  path?: string;
+  /** Original source URL, shown as a footnote link on the page. */
+  url?: string;
+}
+
+/** Ask the offscreen document to package a set of pages into one self-contained HTML wiki. */
+export interface GenerateWikiRequest {
+  target: 'offscreen';
+  type: 'generate_wiki';
+  title: string;
+  pages: WikiPage[];
+}
+
 /** Requests to the offscreen document's OPFS RAG store. */
 /** A single repository serialized for backup (vectors base64-encoded). */
 export interface ExportedRepo {
@@ -376,9 +400,24 @@ export type RepoRequest =
   | { target: 'offscreen-repo'; op: 'list' }
   | { target: 'offscreen-repo'; op: 'delete'; repo: string }
   | { target: 'offscreen-repo'; op: 'docs'; repo: string }
+  | { target: 'offscreen-repo'; op: 'docsText'; repo: string }
   | { target: 'offscreen-repo'; op: 'deleteDoc'; repo: string; docId: string }
   | { target: 'offscreen-repo'; op: 'export' }
-  | { target: 'offscreen-repo'; op: 'import'; repos: ExportedRepo[] };
+  | { target: 'offscreen-repo'; op: 'import'; repos: ExportedRepo[] }
+  | {
+      target: 'offscreen-repo';
+      op: 'addMany';
+      repo: string;
+      docs: Array<{
+        doc: { name: string; url: string };
+        chunks: string[];
+        vectors: number[][];
+        docExtra?: { path?: string; mtime?: number; size?: number };
+        docId?: string;
+      }>;
+      embedModel?: string;
+      kind?: RepoKind;
+    };
 
 export interface RepoResponse {
   ok: boolean;

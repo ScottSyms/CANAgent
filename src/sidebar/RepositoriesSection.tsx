@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { RepoDoc, RepoInfo } from '../shared/messages';
 import {
   filesFromDataTransfer,
+  filesFromList,
   folderRepoName,
   syncFolderFiles,
   type FolderSyncProgress,
@@ -54,8 +55,17 @@ function hostOf(url: string): string {
   }
 }
 
+type RepoTab = 'repos' | 'upload' | 'folder' | 'm365';
+const REPO_TABS: ReadonlyArray<[RepoTab, string]> = [
+  ['repos', 'repos.tabRepos'],
+  ['upload', 'repos.tabUpload'],
+  ['folder', 'repos.tabFolder'],
+  ['m365', 'repos.tabM365'],
+];
+
 export function RepositoriesSection() {
   const t = useT();
+  const [subTab, setSubTab] = useState<RepoTab>('repos');
   const [repos, setRepos] = useState<RepoInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -65,6 +75,7 @@ export function RepositoriesSection() {
   const [folderBusy, setFolderBusy] = useState<string | null>(null);
   const [folderStatus, setFolderStatus] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const load = async () => {
     setLoading(true);
@@ -168,6 +179,19 @@ export function RepositoriesSection() {
     await remove(name);
   };
 
+  // Native folder picker (webkitdirectory) — the drag-and-drop zone below covers
+  // the same ground, but a picker is the more discoverable path on its own tab.
+  const onFolderPick = async (e: Event) => {
+    const input = e.target as HTMLInputElement;
+    const list = input.files;
+    input.value = '';
+    if (!list || list.length === 0) return;
+    const { rootName, files } = filesFromList(list);
+    const repo = folderRepoName(rootName);
+    const exists = repos.some((r) => r.name === repo && r.kind === 'folder');
+    await indexFiles(repo, files, exists ? repo : 'new', exists);
+  };
+
   return (
     <details class="sites-section settings-acc" open>
       <summary class="settings-header settings-acc-summary">
@@ -175,87 +199,131 @@ export function RepositoriesSection() {
         <span class="sites-count">{repos.length}</span>
       </summary>
       <p class="settings-note">{t('repos.note')}</p>
-      <RepoUpload
-        onDone={(s) => {
-          setBanner(t('repos.upload.done', { n: String(s.added), repo: s.repo }));
-          void load();
-        }}
-      />
-      <div
-        class={`repo-folder-drop${dragOver ? ' repo-folder-drop--over' : ''}${folderBusy !== null ? ' repo-folder-drop--busy' : ''}`}
-        onDragOver={(e) => {
-          e.preventDefault();
-          if (folderBusy === null) setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => folderBusy === null && void onFolderDrop(e)}
-      >
-        <strong>{folderBusy !== null ? t('repos.folder.working') : t('repos.folder.dropTitle')}</strong>
-        <span class="settings-note">{t('repos.folder.dropHint')}</span>
+
+      <div class="settings-tabs" role="tablist">
+        {REPO_TABS.map(([key, label]) => (
+          <button
+            key={key}
+            role="tab"
+            aria-selected={subTab === key}
+            class={`settings-tab ${subTab === key ? 'is-active' : ''}`}
+            onClick={() => setSubTab(key)}
+          >
+            {t(label)}
+          </button>
+        ))}
       </div>
-      {folderStatus && <p class="settings-note repo-folder-status">{folderStatus}</p>}
-      <SharePointSection onChanged={() => void load()} />
-      <MailboxSection onChanged={() => void load()} />
+
       {banner && <UploadBanner text={banner} onDismiss={() => setBanner(null)} />}
-      {loading ? (
-        <p class="settings-note">{t('repos.loading')}</p>
-      ) : repos.length === 0 ? (
-        <p class="settings-note">{t('repos.empty')}</p>
-      ) : (
-        <ul class="sites-list">
-          {repos.map((r) => (
-            <li key={r.name} class="repo-block">
-              <div class="site-row">
-                <button
-                  class="repo-toggle"
-                  title={expanded === r.name ? t('repos.hideDocs') : t('repos.showDocs')}
-                  onClick={() => toggle(r.name)}
-                >
-                  {expanded === r.name ? '▾' : '▸'} {r.name}
-                </button>
-                <span class="site-desc">
-                  {r.docs} {t('repos.docs')}, {r.chunks} {t('repos.chunks')}
-                </span>
-                {r.kind === 'folder' && folderBusy === r.name && <span class="site-desc" title={t('repos.folder.refresh')}>⏳</span>}
-                <button
-                  class="icon-btn"
-                  aria-label={t('repos.deleteRepo')}
-                  title={t('repos.deleteRepo')}
-                  onClick={() => (r.kind === 'folder' ? removeFolder(r.name) : remove(r.name))}
-                >
-                  ✕
-                </button>
-              </div>
-              {expanded === r.name && (
-                <ul class="repo-docs">
-                  {docsLoading ? (
-                    <li class="settings-note">{t('repos.loading')}</li>
-                  ) : docs.length === 0 ? (
-                    <li class="settings-note">{t('repos.noDocs')}</li>
-                  ) : (
-                    docs.map((d) => (
-                      <li key={d.id} class="repo-doc-row" title={d.url}>
-                        <span class="repo-doc-name">{d.name || hostOf(d.url)}</span>
-                        <span class="repo-doc-meta">
-                          {hostOf(d.url)} · {d.chunkCount} {t('repos.chunks')}
-                        </span>
-                        <button
-                          class="icon-btn"
-                          aria-label={t('repos.deleteDoc')}
-                          title={t('repos.deleteDoc')}
-                          onClick={() => removeDoc(r.name, d.id)}
-                        >
-                          ✕
-                        </button>
-                      </li>
-                    ))
-                  )}
-                </ul>
-              )}
-            </li>
-          ))}
-        </ul>
+
+      {subTab === 'upload' && (
+        <RepoUpload
+          onDone={(s) => {
+            setBanner(t('repos.upload.done', { n: String(s.added), repo: s.repo }));
+            void load();
+          }}
+        />
       )}
+
+      {subTab === 'folder' && (
+        <>
+          <p class="settings-note">{t('repos.folder.hint')}</p>
+          <div class="repo-folder-row">
+            <button class="btn" disabled={folderBusy !== null} onClick={() => folderInputRef.current?.click()}>
+              {t('repos.folder.pick')}
+            </button>
+          </div>
+          <input
+            ref={folderInputRef}
+            type="file"
+            // @ts-expect-error webkitdirectory isn't in the DOM lib's input typings
+            webkitdirectory=""
+            style="display:none"
+            onChange={(e) => void onFolderPick(e)}
+          />
+          <div
+            class={`repo-folder-drop${dragOver ? ' repo-folder-drop--over' : ''}${folderBusy !== null ? ' repo-folder-drop--busy' : ''}`}
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (folderBusy === null) setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => folderBusy === null && void onFolderDrop(e)}
+          >
+            <strong>{folderBusy !== null ? t('repos.folder.working') : t('repos.folder.dropTitle')}</strong>
+            <span class="settings-note">{t('repos.folder.dropHint')}</span>
+          </div>
+          {folderStatus && <p class="settings-note repo-folder-status">{folderStatus}</p>}
+        </>
+      )}
+
+      {subTab === 'm365' && (
+        <>
+          <SharePointSection onChanged={() => void load()} />
+          <MailboxSection onChanged={() => void load()} />
+        </>
+      )}
+
+      {subTab === 'repos' &&
+        (loading ? (
+          <p class="settings-note">{t('repos.loading')}</p>
+        ) : repos.length === 0 ? (
+          <p class="settings-note">{t('repos.empty')}</p>
+        ) : (
+          <ul class="sites-list">
+            {repos.map((r) => (
+              <li key={r.name} class="repo-block">
+                <div class="site-row">
+                  <button
+                    class="repo-toggle"
+                    title={expanded === r.name ? t('repos.hideDocs') : t('repos.showDocs')}
+                    onClick={() => toggle(r.name)}
+                  >
+                    {expanded === r.name ? '▾' : '▸'} {r.name}
+                  </button>
+                  <span class="site-desc">
+                    {r.docs} {t('repos.docs')}, {r.chunks} {t('repos.chunks')}
+                  </span>
+                  {r.kind === 'folder' && folderBusy === r.name && <span class="site-desc" title={t('repos.folder.refresh')}>⏳</span>}
+                  <button
+                    class="icon-btn"
+                    aria-label={t('repos.deleteRepo')}
+                    title={t('repos.deleteRepo')}
+                    onClick={() => (r.kind === 'folder' ? removeFolder(r.name) : remove(r.name))}
+                  >
+                    ✕
+                  </button>
+                </div>
+                {expanded === r.name && (
+                  <ul class="repo-docs">
+                    {docsLoading ? (
+                      <li class="settings-note">{t('repos.loading')}</li>
+                    ) : docs.length === 0 ? (
+                      <li class="settings-note">{t('repos.noDocs')}</li>
+                    ) : (
+                      docs.map((d) => (
+                        <li key={d.id} class="repo-doc-row" title={d.url}>
+                          <span class="repo-doc-name">{d.name || hostOf(d.url)}</span>
+                          <span class="repo-doc-meta">
+                            {hostOf(d.url)} · {d.chunkCount} {t('repos.chunks')}
+                          </span>
+                          <button
+                            class="icon-btn"
+                            aria-label={t('repos.deleteDoc')}
+                            title={t('repos.deleteDoc')}
+                            onClick={() => removeDoc(r.name, d.id)}
+                          >
+                            ✕
+                          </button>
+                        </li>
+                      ))
+                    )}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ul>
+        ))}
     </details>
   );
 }

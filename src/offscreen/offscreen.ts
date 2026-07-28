@@ -26,6 +26,7 @@ import type {
   GenerateDocumentRequest,
   GenerateDocumentResponse,
   GeneratePresentationRequest,
+  GenerateWikiRequest,
   ProductRequest,
   ProductResponse,
   RepoRequest,
@@ -33,6 +34,8 @@ import type {
 } from '../shared/messages';
 import {
   repoAdd,
+  repoAddMany,
+  repoAllDocsText,
   repoDelete,
   repoDeleteDoc,
   repoDocs,
@@ -80,18 +83,21 @@ async function extractPdf(url: string, maxChars?: number): Promise<ExtractPdfRes
       isEvalSupported: false, // required under MV3 CSP
       disableFontFace: true,
     } as unknown as Parameters<typeof pdfjs.getDocument>[0]).promise;
-    let text = '';
+    const parts: string[] = [];
+    let runningLen = 0;
     let hitSafety = false;
     for (let p = 1; p <= doc.numPages; p++) {
       const page = await doc.getPage(p);
       const content = await page.getTextContent();
-      text += pageItemsToText(content.items as Array<{ str?: string; hasEOL?: boolean }>) + '\n\n';
-      if (text.length > SAFETY_MAX) {
+      const pageText = pageItemsToText(content.items as Array<{ str?: string; hasEOL?: boolean }>) + '\n\n';
+      parts.push(pageText);
+      runningLen += pageText.length;
+      if (runningLen > SAFETY_MAX) {
         hitSafety = true;
         break;
       }
     }
-    text = text.trim();
+    const text = parts.join('').trim();
     const charCount = text.length;
     const limit = maxChars ?? SAFETY_MAX;
     const truncated = hitSafety || charCount > limit;
@@ -148,6 +154,24 @@ chrome.runtime.onMessage.addListener((message: GeneratePresentationRequest, _sen
         dataBase64,
         mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       } satisfies GenerateDocumentResponse);
+    } catch (e) {
+      sendResponse({ ok: false, error: String(e) } satisfies GenerateDocumentResponse);
+    }
+  })();
+  return true; // async response
+});
+
+// ----- Wiki generation: repo documents -> one self-contained HTML file (create_wiki tool). -----
+
+chrome.runtime.onMessage.addListener((message: GenerateWikiRequest, _sender, sendResponse) => {
+  if (message?.target !== 'offscreen' || message.type !== 'generate_wiki') return undefined;
+  (async () => {
+    try {
+      // Lazy import so marked/DOMPurify's wiki-template code only loads when requested.
+      const { buildWikiHtml } = await import('./wikiGen');
+      const html = buildWikiHtml(message.title, message.pages);
+      const dataBase64 = btoa(unescape(encodeURIComponent(html)));
+      sendResponse({ ok: true, dataBase64, mimeType: 'text/html' } satisfies GenerateDocumentResponse);
     } catch (e) {
       sendResponse({ ok: false, error: String(e) } satisfies GenerateDocumentResponse);
     }
@@ -387,12 +411,16 @@ async function handleRepo(req: RepoRequest): Promise<RepoResponse> {
         return { ok: true };
       case 'docs':
         return { ok: true, result: await repoDocs(req.repo) };
+      case 'docsText':
+        return { ok: true, result: await repoAllDocsText(req.repo) };
       case 'deleteDoc':
         return { ok: true, result: await repoDeleteDoc(req.repo, req.docId) };
       case 'export':
         return { ok: true, result: await repoExportAll() };
       case 'import':
         return { ok: true, result: await repoImportAll(req.repos) };
+      case 'addMany':
+        return { ok: true, result: await repoAddMany(req.repo, req.docs, { embedModel: req.embedModel, kind: req.kind }) };
     }
   } catch (e) {
     return { ok: false, error: String(e) };

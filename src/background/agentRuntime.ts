@@ -21,7 +21,7 @@
 // testable in principle and decoupled from the panel.
 // =============================================================================
 
-import type { ApprovalContext } from '../shared/messages';
+import type { ApprovalContext, WikiPage } from '../shared/messages';
 import type { CapabilityRegistryEntry } from '../shared/capabilities';
 import { isTrustedForAutoApproval, resolveAuth } from '../shared/capabilities';
 import type { BackgroundEvent } from '../shared/messages';
@@ -75,7 +75,7 @@ import { captureFullPage } from './fullPageCapture';
 import { mcpCallTool, mcpListTools } from './mcpClient';
 import { complete, embedChunks, embedderId, LLM_TIMEOUT_MS, resolveModelForRole, type ContentPart, type LlmMessage, type LlmToolCall } from './llmProvider';
 import { deriveStepBudget, findSimilarLesson, parseLesson, parseReflectionVerdict, parseSummaryArray, relevantLessons, repairToolPairing, withMergedSystemState } from './loopHelpers';
-import { generateDocument, generatePresentation, productSave, repoDeleteDoc, repoDocs, repoList, repoSearch } from './offscreenClient';
+import { generateDocument, generatePresentation, generateWiki, productSave, repoDeleteDoc, repoDocs, repoDocsText, repoList, repoSearch } from './offscreenClient';
 import { normalizeSlides } from '../shared/slides';
 import type { SearchHit } from '../shared/vectorSearch';
 import { ingestTab } from './repoIngest';
@@ -2883,6 +2883,8 @@ export class AgentRuntime {
         return this.createWordDocument(args);
       case 'create_powerpoint':
         return this.createPowerpoint(args);
+      case 'create_wiki':
+        return this.createWiki(args);
       case 'set_plan':
         return this.setPlan(Array.isArray(args.steps) ? (args.steps as string[]).map(String) : []);
       case 'update_plan':
@@ -3470,6 +3472,32 @@ export class AgentRuntime {
       fileArtifact,
     });
     return `Created the PowerPoint "${fileArtifact.filename}" with ${slides.length} slide(s). The user can download it from the card.`;
+  }
+
+  private async createWiki(args: Record<string, unknown>): Promise<string> {
+    const repo = String(args.repo ?? '').trim();
+    if (!repo) return 'Error: create_wiki needs a repo name.';
+    const title = String(args.title ?? '').trim() || repo;
+    const docs = await repoDocsText(repo);
+    if (docs.length === 0) return `Error: repository "${repo}" has no documents (or doesn't exist).`;
+    const pages: WikiPage[] = docs.map((d) => ({ title: d.name, text: d.text, path: d.path, url: d.url }));
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'wiki';
+    const result = await generateWiki(title, pages);
+    if (!result.ok || !result.dataBase64) {
+      return `Error: could not generate the wiki. ${result.error ?? ''}`.trim();
+    }
+    const fileArtifact: FileArtifact = {
+      filename: `${slug}.html`,
+      mimeType: result.mimeType ?? 'text/html',
+      dataBase64: result.dataBase64,
+    };
+    this.pushChat({
+      role: 'notice',
+      text: `Prepared a wiki from "${repo}" (${pages.length} page${pages.length === 1 ? '' : 's'}). Download it from the card below and open it in a browser.`,
+      timestamp: new Date().toISOString(),
+      fileArtifact,
+    });
+    return `Created the wiki "${fileArtifact.filename}" from ${pages.length} document(s) in "${repo}". The user can download it from the card.`;
   }
 
   /**

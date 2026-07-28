@@ -36,7 +36,7 @@ import {
   repoImport,
   repoList,
 } from './offscreenClient';
-import { ingestFile } from './repoIngest';
+import { ingestFiles } from './repoIngest';
 import { indexMailbox, type MailSyncProgress } from './mailIngest';
 import {
   indexSharePointLibrary,
@@ -399,11 +399,8 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
       if (!settings) {
         return { ok: false, results: [], error: 'No model configured. Open Settings first.' };
       }
-      const results = [];
-      for (const file of request.files) {
-        const res = await ingestFile(settings, request.repo, file, request.kind ?? 'page');
-        results.push({ name: file.name, ok: res.ok, chunks: res.chunks, error: res.error });
-      }
+      const outcomes = await ingestFiles(settings, request.repo, request.files, request.kind ?? 'page');
+      const results = outcomes.map((res, i) => ({ name: request.files[i].name, ok: res.ok, chunks: res.chunks, error: res.error }));
       return { ok: results.some((r) => r.ok), results };
     })().then(sendResponse);
     return true;

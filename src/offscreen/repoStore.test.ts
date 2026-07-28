@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { repoAdd, repoDeleteDoc, repoList, repoSearch } from './repoStore';
+import { repoAdd, repoAddMany, repoAllDocsText, repoDeleteDoc, repoDocs, repoList, repoSearch } from './repoStore';
 
 // ---- minimal in-memory OPFS fake (only the surface repoStore uses) ----
 
@@ -135,6 +135,83 @@ describe('repoStore folder metadata', () => {
     });
     const list = await repoSearch('f', vec(8, 1), 1, 'local:minilm');
     expect(list.results.length).toBe(1);
+  });
+});
+
+describe('repoAddMany', () => {
+  it('adds several documents in one call with correct chunk offsets, matching a sequential repoAdd loop', async () => {
+    const res = await repoAddMany(
+      'batch',
+      [
+        { doc: { name: 'a', url: 'file:///a' }, chunks: ['a1', 'a2'], vectors: [vec(8, 1), vec(8, 2)] },
+        { doc: { name: 'b', url: 'file:///b' }, chunks: ['b1'], vectors: [vec(8, 3)] },
+        { doc: { name: 'c', url: 'file:///c' }, chunks: ['c1', 'c2', 'c3'], vectors: [vec(8, 4), vec(8, 5), vec(8, 6)] },
+      ],
+      { embedModel: 'local:minilm', kind: 'folder' },
+    );
+    expect(res.chunkCount).toBe(6);
+    expect(res.docs.map((d) => d.chunkCount)).toEqual([2, 3, 6]);
+
+    const docs = await repoDocs('batch');
+    expect(docs.map((d) => ({ name: d.name, chunkStart: d.chunkStart, chunkCount: d.chunkCount }))).toEqual([
+      { name: 'a', chunkStart: 0, chunkCount: 2 },
+      { name: 'b', chunkStart: 2, chunkCount: 1 },
+      { name: 'c', chunkStart: 3, chunkCount: 3 },
+    ]);
+
+    // Every chunk is searchable — the batch write didn't drop or misalign anything.
+    const hits = await repoSearch('batch', vec(8, 4), 6, 'local:minilm');
+    expect(hits.results.map((h) => h.text).sort()).toEqual(['a1', 'a2', 'b1', 'c1', 'c2', 'c3']);
+  });
+
+  it('enforces the same embedder model lock as repoAdd', async () => {
+    await repoAddMany('batch', [{ doc: { name: 'a', url: 'file:///a' }, chunks: ['a1'], vectors: [vec(8, 1)] }], {
+      embedModel: 'local:minilm',
+    });
+    await expect(
+      repoAddMany('batch', [{ doc: { name: 'b', url: 'file:///b' }, chunks: ['b1'], vectors: [vec(8, 2)] }], {
+        embedModel: 'external:te3',
+      }),
+    ).rejects.toThrow(/built with embedder "local:minilm".*"external:te3"/);
+  });
+
+  it('appending via repoAddMany after repoAdd (and vice versa) produces the same repo state', async () => {
+    await repoAdd('mixed', { name: 'a', url: 'file:///a' }, ['a1'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    await repoAddMany(
+      'mixed',
+      [
+        { doc: { name: 'b', url: 'file:///b' }, chunks: ['b1'], vectors: [vec(8, 2)] },
+        { doc: { name: 'c', url: 'file:///c' }, chunks: ['c1'], vectors: [vec(8, 3)] },
+      ],
+      { embedModel: 'local:minilm' },
+    );
+    const docs = await repoDocs('mixed');
+    expect(docs.map((d) => d.name)).toEqual(['a', 'b', 'c']);
+    expect(docs.map((d) => d.chunkStart)).toEqual([0, 1, 2]);
+  });
+});
+
+describe('repoAllDocsText', () => {
+  it('reassembles each document\'s full text from its contiguous chunk range', async () => {
+    await repoAdd('wiki', { name: 'a', url: 'file:///a' }, ['a1', 'a2'], [vec(8, 1), vec(8, 2)], {
+      embedModel: 'local:minilm',
+      kind: 'folder',
+      docExtra: { path: 'notes/a.md' },
+    });
+    await repoAdd('wiki', { name: 'b', url: 'file:///b' }, ['b1'], [vec(8, 3)], {
+      embedModel: 'local:minilm',
+      kind: 'folder',
+      docExtra: { path: 'notes/b.md' },
+    });
+    const docs = await repoAllDocsText('wiki');
+    expect(docs.map((d) => ({ name: d.name, path: d.path, text: d.text }))).toEqual([
+      { name: 'a', path: 'notes/a.md', text: 'a1\n\na2' },
+      { name: 'b', path: 'notes/b.md', text: 'b1' },
+    ]);
+  });
+
+  it('returns an empty array for a repo that does not exist', async () => {
+    expect(await repoAllDocsText('missing')).toEqual([]);
   });
 });
 

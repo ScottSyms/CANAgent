@@ -15,7 +15,7 @@ import { resolveOfficeUrl, resolvePdfUrl } from '../shared/url';
 import * as browser from './browserToolAdapter';
 import { captureFullPage } from './fullPageCapture';
 import { complete, embedChunks, embedderId, resolveModelForRole, type ContentPart } from './llmProvider';
-import { extractOffice, extractPdf, repoAdd } from './offscreenClient';
+import { extractOffice, extractPdf, repoAdd, repoAddMany } from './offscreenClient';
 
 // OCR fallback: screenshot the whole (active) tab and have the vision model
 // transcribe it. Only works for the active tab (captureVisibleTab limitation).
@@ -127,38 +127,118 @@ export async function storeText(
 }
 
 /**
- * Ingest an uploaded file into a repository. Text-like files arrive with their
- * text already read in the UI; PDF/Office files arrive as a data URL the
- * offscreen extractor (pdf.js / OOXML) parses — the same path used for tabs.
+ * Chunk → embed → store several documents as one batch. Unlike calling
+ * `storeText` in a loop, this makes exactly one `embedChunks` call (all
+ * documents' chunks concatenated — a bigger batch is more efficient for the
+ * embedder than N small ones) and one `repoAddMany` call (avoids `repoAdd`'s
+ * per-document full chunks.json read/rewrite — see repoStore.ts).
  */
-export async function ingestFile(
+export async function storeTexts(
   settings: Settings,
   repo: string,
-  file: { name: string; kind: 'text' | 'pdf' | 'office'; text?: string; dataUrl?: string; path?: string; mtime?: number; size?: number },
-  repoKind: RepoKind = 'page',
-): Promise<IngestResult> {
-  let text = (file.text ?? '').trim();
-  try {
-    if (!text && file.kind === 'pdf' && file.dataUrl) {
-      const pdf = await extractPdf(file.dataUrl);
-      if (pdf.ok && pdf.text) text = pdf.text.trim();
-      else if (!pdf.ok) return { ok: false, error: pdf.error ?? 'Could not read the PDF.' };
-    } else if (!text && file.kind === 'office' && file.dataUrl) {
-      const office = await extractOffice(file.dataUrl);
-      if (office.ok && office.text) text = office.text.trim();
-      else if (!office.ok) return { ok: false, error: office.error ?? 'Could not read the document.' };
-    }
-  } catch (e) {
-    return { ok: false, error: String(e) };
-  }
-  if (text.length < 1) return { ok: false, error: 'No extractable text in the file.' };
-  // Folder docs keep their relative path as both the display name and url so the
-  // agent can cite the file, and as the incremental-sync key in DocMeta.
-  const path = file.path;
-  const name = path || file.name;
-  const url = `file:///${path || file.name}`;
-  return storeText(settings, repo, name, url, text, {
-    kind: repoKind,
-    docExtra: { path, mtime: file.mtime, size: file.size },
+  items: Array<{ name: string; url: string; text: string; docExtra?: { path?: string; mtime?: number; size?: number } }>,
+  opts: { kind?: RepoKind } = {},
+): Promise<IngestResult[]> {
+  const perDoc = items.map((it) => ({ ...it, chunks: chunkText(it.text) }));
+  const flatChunks: string[] = [];
+  const bounds = perDoc.map((d) => {
+    const start = flatChunks.length;
+    flatChunks.push(...d.chunks);
+    return { start, count: d.chunks.length };
   });
+  if (flatChunks.length === 0) return perDoc.map(() => ({ ok: false, error: 'No chunks produced.' }));
+
+  let vectors: number[][];
+  try {
+    vectors = await embedChunks(settings, flatChunks);
+  } catch (e) {
+    const error = String(e);
+    return perDoc.map((d) => (d.chunks.length === 0 ? { ok: false, error: 'No chunks produced.' } : { ok: false, error }));
+  }
+
+  const docsForAdd = perDoc
+    .map((d, i) => ({ d, i }))
+    .filter(({ d }) => d.chunks.length > 0)
+    .map(({ d, i }) => ({
+      doc: { name: d.name, url: d.url },
+      chunks: d.chunks,
+      vectors: vectors.slice(bounds[i].start, bounds[i].start + bounds[i].count),
+      docExtra: d.docExtra,
+    }));
+
+  let addError: string | undefined;
+  if (docsForAdd.length > 0) {
+    const res = await repoAddMany(repo, docsForAdd, { embedModel: embedderId(settings), kind: opts.kind });
+    if (!res.ok) addError = res.error ?? 'Could not store the documents.';
+  }
+
+  return perDoc.map((d) => {
+    if (d.chunks.length === 0) return { ok: false, error: 'No chunks produced.' };
+    if (addError) return { ok: false, error: addError };
+    return { ok: true, chunks: d.chunks.length };
+  });
+}
+
+/**
+ * Ingest several uploaded files at once. Extraction (PDF/Office parsing) runs
+ * in parallel — each call is a stateless, independent pdf.js/fflate parse of
+ * its own bytes. Embedding and the OPFS write are then done as ONE batch via
+ * `storeTexts` rather than per-file, since the embedder's ONNX session isn't
+ * safe to invoke concurrently (unlike extraction). A per-file extraction
+ * failure doesn't block the others; only successfully-extracted files reach
+ * the batch store.
+ */
+export async function ingestFiles(
+  settings: Settings,
+  repo: string,
+  files: Array<{ name: string; kind: 'text' | 'pdf' | 'office'; text?: string; dataUrl?: string; path?: string; mtime?: number; size?: number }>,
+  repoKind: RepoKind = 'page',
+): Promise<IngestResult[]> {
+  type Extracted = { ok: true; text: string; path?: string; mtime?: number; size?: number } | { ok: false; error: string };
+
+  const extracted: Extracted[] = await Promise.all(
+    files.map(async (file): Promise<Extracted> => {
+      let text = (file.text ?? '').trim();
+      try {
+        if (!text && file.kind === 'pdf' && file.dataUrl) {
+          const pdf = await extractPdf(file.dataUrl);
+          if (pdf.ok && pdf.text) text = pdf.text.trim();
+          else if (!pdf.ok) return { ok: false, error: pdf.error ?? 'Could not read the PDF.' };
+        } else if (!text && file.kind === 'office' && file.dataUrl) {
+          const office = await extractOffice(file.dataUrl);
+          if (office.ok && office.text) text = office.text.trim();
+          else if (!office.ok) return { ok: false, error: office.error ?? 'Could not read the document.' };
+        }
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+      if (text.length < 1) return { ok: false, error: 'No extractable text in the file.' };
+      return { ok: true, text, path: file.path, mtime: file.mtime, size: file.size };
+    }),
+  );
+
+  const okIndexes = extracted.map((e, i) => ({ e, i })).filter(({ e }) => e.ok);
+  if (okIndexes.length === 0) {
+    return extracted.map((e) => (e.ok ? { ok: true } : { ok: false, error: e.error }));
+  }
+
+  const storeResults = await storeTexts(
+    settings,
+    repo,
+    okIndexes.map(({ e, i }) => {
+      const x = e as Extract<Extracted, { ok: true }>;
+      const path = x.path;
+      const name = path || files[i].name;
+      return {
+        name,
+        url: `file:///${path || files[i].name}`,
+        text: x.text,
+        docExtra: { path, mtime: x.mtime, size: x.size },
+      };
+    }),
+    { kind: repoKind },
+  );
+
+  let si = 0;
+  return extracted.map((e) => (e.ok ? storeResults[si++] : { ok: false, error: e.error }));
 }
