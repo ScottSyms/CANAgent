@@ -353,6 +353,8 @@ export interface WikiPage {
   path?: string;
   /** Original source URL, shown as a footnote link on the page. */
   url?: string;
+  /** ISO timestamp the source document was captured/indexed — powers the "Recently added" rail card. */
+  capturedAt?: string;
 }
 
 /** Ask the offscreen document to package a set of pages into one self-contained HTML wiki. */

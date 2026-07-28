@@ -23,7 +23,7 @@ export async function buildWikiFromRepo(
   if (docs.length === 0) {
     return { ok: false, error: `Repository "${repo}" has no documents (or doesn't exist).` };
   }
-  const pages: WikiPage[] = docs.map((d) => ({ title: d.name, text: d.text, path: d.path, url: d.url }));
+  const pages: WikiPage[] = docs.map((d) => ({ title: d.name, text: d.text, path: d.path, url: d.url, capturedAt: d.capturedAt }));
   const finalTitle = (title || repo).trim();
   const result = await generateWiki(finalTitle, pages, lang);
   if (!result.ok || !result.dataBase64) {

@@ -38,8 +38,8 @@ describe('buildWikiFromRepo', () => {
     expect(generateWiki).toHaveBeenCalledWith(
       'My Notes',
       [
-        { title: 'a', text: 'alpha', path: 'notes/a.md', url: 'file:///a' },
-        { title: 'b', text: 'beta', path: undefined, url: 'file:///b' },
+        { title: 'a', text: 'alpha', path: 'notes/a.md', url: 'file:///a', capturedAt: 't' },
+        { title: 'b', text: 'beta', path: undefined, url: 'file:///b', capturedAt: 't' },
       ],
       'fr',
     );
