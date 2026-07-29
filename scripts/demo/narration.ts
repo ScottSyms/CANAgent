@@ -193,7 +193,7 @@ export const SCENES: SceneDef[] = [
   {
     id: 'history',
     title: 'History, undo, and the More menu',
-    action: 'History overlay with generated title and summary; the ⋯ More menu with text-size, save, undo, learn mode.',
+    action: 'History overlay with generated title and summary; the ⋯ More menu with text-size, save, undo.',
     beats: {
     en: [
       { mark: 'start', text: 'Every conversation is saved automatically — there is no save button to forget.' },
@@ -201,7 +201,7 @@ export const SCENES: SceneDef[] = [
       {
         mark: 'more',
         text:
-          'The three-dot menu holds the everyday extras: the text-size control, saving the conversation as a file, undoing the last exchange, and learn mode.',
+          'The three-dot menu holds the everyday extras: the text-size control, saving the conversation as a file, and undoing the last exchange.',
       },
       { mark: 'done', text: 'And New Chat starts fresh — the old thread stays safely in history.' },
     ],
@@ -211,7 +211,7 @@ export const SCENES: SceneDef[] = [
       { mark: 'opened', text:
         'Chaque fil reçoit un titre et un résumé générés, avec recherche, tri, et étiquettes de couleur.' },
       { mark: 'more', text:
-        'Le menu à trois points regroupe les extras du quotidien : la taille du texte, l’enregistrement de la conversation, l’annulation du dernier échange, et le mode apprentissage.' },
+        'Le menu à trois points regroupe les extras du quotidien : la taille du texte, l’enregistrement de la conversation, et l’annulation du dernier échange.' },
       { mark: 'done', text:
         'Et Nouvelle conversation repart à neuf — l’ancien fil reste bien dans l’historique.' },
     ],

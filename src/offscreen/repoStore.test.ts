@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { repoAdd, repoAddMany, repoAllDocsText, repoDeleteDoc, repoDocs, repoList, repoSearch } from './repoStore';
+import { repoAdd, repoAddMany, repoDeleteDoc, repoDocs, repoList, repoSearch } from './repoStore';
 
 // ---- minimal in-memory OPFS fake (only the surface repoStore uses) ----
 
@@ -188,30 +188,6 @@ describe('repoAddMany', () => {
     const docs = await repoDocs('mixed');
     expect(docs.map((d) => d.name)).toEqual(['a', 'b', 'c']);
     expect(docs.map((d) => d.chunkStart)).toEqual([0, 1, 2]);
-  });
-});
-
-describe('repoAllDocsText', () => {
-  it('reassembles each document\'s full text from its contiguous chunk range', async () => {
-    await repoAdd('wiki', { name: 'a', url: 'file:///a' }, ['a1', 'a2'], [vec(8, 1), vec(8, 2)], {
-      embedModel: 'local:minilm',
-      kind: 'folder',
-      docExtra: { path: 'notes/a.md' },
-    });
-    await repoAdd('wiki', { name: 'b', url: 'file:///b' }, ['b1'], [vec(8, 3)], {
-      embedModel: 'local:minilm',
-      kind: 'folder',
-      docExtra: { path: 'notes/b.md' },
-    });
-    const docs = await repoAllDocsText('wiki');
-    expect(docs.map((d) => ({ name: d.name, path: d.path, text: d.text }))).toEqual([
-      { name: 'a', path: 'notes/a.md', text: 'a1\n\na2' },
-      { name: 'b', path: 'notes/b.md', text: 'b1' },
-    ]);
-  });
-
-  it('returns an empty array for a repo that does not exist', async () => {
-    expect(await repoAllDocsText('missing')).toEqual([]);
   });
 });
 

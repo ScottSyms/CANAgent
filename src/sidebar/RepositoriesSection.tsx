@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import type { RepoDoc, RepoInfo, WikiFileResult } from '../shared/messages';
-import { saveFile } from './download';
+import type { RepoDoc, RepoInfo } from '../shared/messages';
 import {
   filesFromDataTransfer,
   filesFromList,
@@ -56,13 +55,6 @@ function hostOf(url: string): string {
   }
 }
 
-function base64ToBlob(base64: string, mimeType: string): Blob {
-  const bin = atob(base64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], { type: mimeType });
-}
-
 const FILE_GLYPH = (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -92,7 +84,6 @@ export function RepositoriesSection() {
   const [folderBusy, setFolderBusy] = useState<string | null>(null);
   const [folderStatus, setFolderStatus] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const [wikiBusy, setWikiBusy] = useState<string | null>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   const load = async () => {
@@ -156,24 +147,6 @@ export function RepositoriesSection() {
     await chrome.runtime.sendMessage({ type: 'repo_doc_delete', repo, docId });
     await loadDocs(repo);
     void load(); // refresh doc/chunk counts
-  };
-
-  const generateWiki = async (repo: string, lang: 'en' | 'fr') => {
-    setBanner(null);
-    setWikiBusy(`${repo}:${lang}`);
-    try {
-      const res = (await chrome.runtime.sendMessage({ type: 'generate_wiki_from_repo', repo, lang })) as WikiFileResult;
-      if (!res?.ok || !res.dataBase64 || !res.filename) {
-        setBanner(t('repos.wikiError', { msg: res?.error ?? 'unknown error' }));
-        return;
-      }
-      saveFile(base64ToBlob(res.dataBase64, res.mimeType ?? 'text/html'), res.filename);
-      setBanner(t('repos.wikiDone'));
-    } catch (e) {
-      setBanner(t('repos.wikiError', { msg: e instanceof Error ? e.message : String(e) }));
-    } finally {
-      setWikiBusy(null);
-    }
   };
 
   // Shared indexer: sync `files` into `repo` (re-fetching existing docs when this
@@ -351,22 +324,6 @@ export function RepositoriesSection() {
                         </span>
                       </div>
                       <div class="ws-item-actions">
-                        <button
-                          class="btn btn-small"
-                          title={t('repos.wikiEnHint')}
-                          disabled={wikiBusy !== null}
-                          onClick={() => void generateWiki(r.name, 'en')}
-                        >
-                          {wikiBusy === `${r.name}:en` ? '…' : t('repos.wikiEn')}
-                        </button>
-                        <button
-                          class="btn btn-small"
-                          title={t('repos.wikiFrHint')}
-                          disabled={wikiBusy !== null}
-                          onClick={() => void generateWiki(r.name, 'fr')}
-                        >
-                          {wikiBusy === `${r.name}:fr` ? '…' : t('repos.wikiFr')}
-                        </button>
                         <button
                           class="icon-btn"
                           aria-label={t('repos.deleteRepo')}

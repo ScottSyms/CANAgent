@@ -838,27 +838,6 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
-      name: 'create_wiki',
-      description:
-        'Generate a downloadable, self-contained HTML wiki from every document in a named on-device knowledge base (repo) — one offline .html file with a sidebar table of contents (grouped by folder for folder-indexed repos), anchored pages, and live client-side search. Use when the user wants to browse or share a knowledge base as a searchable mini-site rather than through chat. The user gets a download card.',
-      parameters: {
-        type: 'object',
-        properties: {
-          repo: { type: 'string', description: 'Repository (knowledge base) name to build the wiki from.' },
-          title: { type: 'string', description: 'Wiki title, shown in the header and used for the filename. Defaults to the repo name.' },
-          lang: {
-            type: 'string',
-            enum: ['en', 'fr'],
-            description: "Language for the wiki's own interface (search box, section labels) — not machine translation of the document content, which is rendered as-is. Defaults to 'en'.",
-          },
-        },
-        required: ['repo'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
       name: 'set_plan',
       description:
         'Lay out (or replace) your step-by-step plan for a multi-step task. Call this first whenever a task needs more than a couple of tool calls, and call it again to revise the plan if something changes. The plan is shown to the user.',

@@ -27,7 +27,6 @@ test.describe('header overflow menu', () => {
     await expect(menu).toBeVisible();
     await expect(sidebar.getByRole('menuitem', { name: /Save conversation/ })).toBeVisible();
     await expect(sidebar.getByRole('menuitem', { name: /Undo last exchange/ })).toBeVisible();
-    await expect(sidebar.getByRole('menuitem', { name: /learn mode/i })).toBeVisible();
 
     // The embedded text-scale control acts without dismissing the menu.
     await menu.getByRole('button', { name: 'Larger text' }).click();

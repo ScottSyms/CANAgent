@@ -29,8 +29,6 @@ export type SidebarCommand =
   | { type: 'stop_task' }
   | { type: 'clear_conversation' }
   | { type: 'undo_exchange' }
-  | { type: 'start_learn_mode' }
-  | { type: 'stop_learn_mode' }
   | { type: 'load_conversation'; id: string }
   | { type: 'delete_conversation'; id: string }
   // `record` is a conversation body already validated by parseConversationFile in
@@ -119,7 +117,6 @@ export type RuntimeRequest =
   | { type: 'index_sharepoint_library'; repo: string; libraryUrl: string }
   | { type: 'sharepoint_session'; base?: string }
   | { type: 'transcribe_audio'; audioDataUrl: string }
-  | { type: 'learn_record_event'; event: import('./learning').LearnEvent }
   // Probe the signed-in environment (M365 identity, open work systems, locale) to
   // populate memory; only honored when the memory feature is enabled.
   | { type: 'probe_environment' }
@@ -174,11 +171,7 @@ export type RuntimeRequest =
   | { type: 'product_get'; id: string }
   | { type: 'product_delete'; id: string }
   | { type: 'products_export' }
-  | { type: 'products_import'; products: ExportedProduct[] }
-  // Build a downloadable wiki HTML file directly from a knowledge base's
-  // documents (Settings UI action) — see wikiExport.ts. The agent's create_wiki
-  // tool goes through the same helper from agentRuntime.ts, not this message.
-  | { type: 'generate_wiki_from_repo'; repo: string; title?: string; lang?: 'en' | 'fr' };
+  | { type: 'products_import'; products: ExportedProduct[] };
 
 /** One picked file on its way into a repository (see shared/uploadFile.ts). */
 export interface UploadFile {
@@ -245,11 +238,6 @@ export interface RepoDoc {
   mtime?: number;
   /** Folder repos: source file size in bytes. */
   size?: number;
-}
-
-/** A repo document with its full text reassembled from chunks — see repoAllDocsText. */
-export interface RepoDocText extends RepoDoc {
-  text: string;
 }
 
 /** Request to the offscreen document to parse a PDF (separate sendMessage channel). */
@@ -344,39 +332,6 @@ export interface GeneratePresentationRequest {
   slides: SlideSpec[];
 }
 
-/** One page of a generated wiki (source doc's title/text, plus optional grouping/link metadata). */
-export interface WikiPage {
-  title: string;
-  /** Markdown or plain text body, rendered client-side in the generated HTML. */
-  text: string;
-  /** Folder-repo relative path — used to group pages into sidebar sections by top-level folder. */
-  path?: string;
-  /** Original source URL, shown as a footnote link on the page. */
-  url?: string;
-  /** ISO timestamp the source document was captured/indexed — powers the "Recently added" rail card. */
-  capturedAt?: string;
-}
-
-/** Ask the offscreen document to package a set of pages into one self-contained HTML wiki. */
-export interface GenerateWikiRequest {
-  target: 'offscreen';
-  type: 'generate_wiki';
-  title: string;
-  pages: WikiPage[];
-  /** Language for the wiki's own chrome (search box, nav labels) — NOT machine translation of the document content. Defaults to 'en'. */
-  lang?: 'en' | 'fr';
-}
-
-/** Result of building a wiki HTML file from a repo's documents (see wikiExport.ts). */
-export interface WikiFileResult {
-  ok: boolean;
-  dataBase64?: string;
-  mimeType?: string;
-  filename?: string;
-  pageCount?: number;
-  error?: string;
-}
-
 /** Requests to the offscreen document's OPFS RAG store. */
 /** A single repository serialized for backup (vectors base64-encoded). */
 export interface ExportedRepo {
@@ -418,7 +373,6 @@ export type RepoRequest =
   | { target: 'offscreen-repo'; op: 'list' }
   | { target: 'offscreen-repo'; op: 'delete'; repo: string }
   | { target: 'offscreen-repo'; op: 'docs'; repo: string }
-  | { target: 'offscreen-repo'; op: 'docsText'; repo: string }
   | { target: 'offscreen-repo'; op: 'deleteDoc'; repo: string; docId: string }
   | { target: 'offscreen-repo'; op: 'export' }
   | { target: 'offscreen-repo'; op: 'import'; repos: ExportedRepo[] }

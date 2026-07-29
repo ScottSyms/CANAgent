@@ -81,12 +81,6 @@ const IconUndo = () => (
     <path d="M3.5 13a9 9 0 1 0 2.6-6.4L3 9" />
   </svg>
 );
-const IconRecord = () => (
-  <svg {...svgProps}>
-    <circle cx="12" cy="12" r="7" />
-    <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" />
-  </svg>
-);
 const IconSettings = () => (
   <svg {...svgProps}>
     <circle cx="12" cy="12" r="3" />
@@ -133,7 +127,6 @@ export function Sidebar() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [configured, setConfigured] = useState<boolean | null>(null);
-  const [learnRecording, setLearnRecording] = useState(false);
   const [uiScale, setUiScale] = useState(() => {
     const s = Number(localStorage.getItem('ba_ui_scale'));
     return s >= 0.8 && s <= 1.6 ? s : 1;
@@ -156,9 +149,6 @@ export function Sidebar() {
       const ok = Boolean(s?.baseUrl && s?.apiKey && s?.model);
       setConfigured(ok);
       if (!ok) setShowOnboarding(true);
-    });
-    chrome.storage.local.get('ba_learn_recording').then((r) => {
-      setLearnRecording(Boolean((r.ba_learn_recording as { active?: boolean } | undefined)?.active));
     });
 
     let port: chrome.runtime.Port;
@@ -249,9 +239,6 @@ export function Sidebar() {
 
     const onStorageChanged = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
       if (area !== 'local') return;
-      if (changes.ba_learn_recording) {
-        setLearnRecording(Boolean((changes.ba_learn_recording.newValue as { active?: boolean } | undefined)?.active));
-      }
       // Settings are edited in the workspace tab now — watch storage so the
       // "no model" banner clears (and onboarding dismisses) the moment a
       // connection is saved there; there is no settings overlay to close.
@@ -281,8 +268,6 @@ export function Sidebar() {
     setErrorBanner(null);
     send({ type: 'user_message', text: lastUserText });
   };
-
-  const toggleLearnMode = () => send({ type: learnRecording ? 'stop_learn_mode' : 'start_learn_mode' });
 
   return (
     <div class="sidebar">
@@ -338,14 +323,6 @@ export function Sidebar() {
                 disabled: !canUndo || status !== 'idle',
                 onSelect: () => send({ type: 'undo_exchange' }),
               },
-              {
-                id: 'learn',
-                label: learnRecording ? t('header.learnStop') : t('header.learnStart'),
-                icon: <IconRecord />,
-                active: learnRecording,
-                disabled: status !== 'idle' && !learnRecording,
-                onSelect: toggleLearnMode,
-              },
             ]}
           />
           <button
@@ -372,15 +349,6 @@ export function Sidebar() {
               ✕
             </button>
           </div>
-        </div>
-      )}
-
-      {learnRecording && (
-        <div class="banner banner-warn">
-          {t('header.learnBanner')}{' '}
-          <button class="link-btn" onClick={toggleLearnMode}>
-            {t('header.learnStop')}
-          </button>
         </div>
       )}
 

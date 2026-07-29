@@ -384,27 +384,6 @@ export async function repoDocs(repo: string): Promise<DocMeta[]> {
   return meta?.docs ?? [];
 }
 
-/**
- * Every document in a repo with its full text reassembled from chunks.json
- * (chunks are appended contiguously per document, so `chunkStart`/`chunkCount`
- * from meta.json slice out exactly one document's chunks in original order).
- * One meta/chunks read for the whole repo — used by wiki generation, which
- * needs every document's full text at once rather than per-chunk snippets.
- */
-export async function repoAllDocsText(repo: string): Promise<Array<DocMeta & { text: string }>> {
-  const dir = await repoDir(repo);
-  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
-  if (!meta) return [];
-  const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
-  return meta.docs.map((d) => ({
-    ...d,
-    text: chunks
-      .slice(d.chunkStart, d.chunkStart + d.chunkCount)
-      .map((c) => c.text)
-      .join('\n\n'),
-  }));
-}
-
 /** Remove one document from a repo, rebuilding vectors.bin + chunks.json + meta. */
 export async function repoDeleteDoc(repo: string, docId: string): Promise<{ removed: number; chunkCount: number }> {
   const dir = await repoDir(repo);

@@ -21,7 +21,6 @@
 import type { BackgroundEvent, RepoInfo, RuntimeRequest, SidebarCommand, TestConnectionResponse } from '../shared/messages';
 import { MAIL_REPO } from '../shared/graphMail';
 import { AgentRuntime } from './agentRuntime';
-import { recordLearnEvent, startLearnRecording, stopLearnRecording } from './learning';
 import { LlmError, testConnection, transcribe } from './llmProvider';
 import {
   productDelete,
@@ -37,7 +36,6 @@ import {
   repoList,
 } from './offscreenClient';
 import { ingestFiles } from './repoIngest';
-import { buildWikiFromRepo } from './wikiExport';
 import { indexMailbox, type MailSyncProgress } from './mailIngest';
 import {
   indexSharePointLibrary,
@@ -250,13 +248,6 @@ function broadcast(event: BackgroundEvent): void {
   }
 }
 
-function broadcastNotice(text: string): void {
-  broadcast({
-    type: 'chat_message',
-    message: { role: 'notice', text, timestamp: new Date().toISOString() },
-  });
-}
-
 // One runtime for the whole extension — a single conversation/agent loop shared
 // by whichever panel is open.
 const runtime = new AgentRuntime(broadcast);
@@ -283,20 +274,6 @@ chrome.runtime.onConnect.addListener((port) => {
         break;
       case 'undo_exchange':
         runtime.undoLastExchange();
-        break;
-      case 'start_learn_mode':
-        void (async () => {
-          const result = await startLearnRecording();
-          if (result.ok) broadcastNotice(`Learn mode started for ${result.recording?.targetHost ?? 'this site'}.`);
-          else broadcastNotice(result.error ?? 'Could not start learn mode.');
-        })();
-        break;
-      case 'stop_learn_mode':
-        void (async () => {
-          const result = await stopLearnRecording();
-          if (result.ok) broadcastNotice(`Saved a learned playbook: /${result.skill?.name ?? 'learned-playbook'}.`);
-          else broadcastNotice(result.error ?? 'Could not stop learn mode.');
-        })();
         break;
       case 'load_conversation':
         void runtime.loadConversation(command.id);
@@ -619,10 +596,6 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     setActiveProjectId(request.id).then(() => sendResponse({ ok: true }));
     return true;
   }
-  if (request.type === 'learn_record_event') {
-    recordLearnEvent(request.event).then(() => sendResponse({ ok: true }));
-    return true;
-  }
   if (request.type === 'scheduled_tasks_get') {
     getScheduledTasks().then(sendResponse);
     return true;
@@ -721,10 +694,6 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
   }
   if (request.type === 'products_import') {
     productImport(request.products).then((r) => sendResponse(r));
-    return true;
-  }
-  if (request.type === 'generate_wiki_from_repo') {
-    buildWikiFromRepo(request.repo, request.title, request.lang ?? 'en').then(sendResponse);
     return true;
   }
   if (request.type === 'probe_environment') {

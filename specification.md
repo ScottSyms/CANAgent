@@ -1213,8 +1213,8 @@ folder in that order) and returns the top 20.
   (`OverflowMenu.tsx` — ARIA menu with roving focus, Escape/click-outside dismiss)
   holding the **text-size control** (A− / percentage-reset / A+, whole-panel CSS
   `zoom`, persisted in `localStorage`, applied before first paint to avoid flash;
-  clicking it does not dismiss the menu), **Save conversation as HTML**, **Undo**
-  (disabled when nothing to undo or while running), and **Learn mode**; and a
+  clicking it does not dismiss the menu), **Save conversation as HTML**, and
+  **Undo** (disabled when nothing to undo or while running); and a
   **settings** (gear) button that opens the Workspace (`workspace.html#settings`).
   The overflow menu exists so the brand title renders untruncated at the
   narrowest (~360px) panel width — guarded by `tests/e2e/header.spec.ts`.

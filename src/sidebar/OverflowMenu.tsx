@@ -17,7 +17,7 @@ export interface OverflowItem {
   label: string;
   icon?: ComponentChildren;
   disabled?: boolean;
-  /** Render highlighted (e.g. learn mode while recording). */
+  /** Render highlighted while active. */
   active?: boolean;
   onSelect: () => void;
 }

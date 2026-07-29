@@ -9,7 +9,6 @@
     "src/content/contentScript.ts",
     "src/content/webmcpBridge.ts",
     "src/content/pointerTracker.ts",
-    "src/content/interactionRecorder.ts",
     "word-addin/src/main.tsx",
     "src/**/*.test.ts",
     "tests/e2e/**/*.ts"

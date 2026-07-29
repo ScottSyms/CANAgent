@@ -26,7 +26,6 @@ import type {
   GenerateDocumentRequest,
   GenerateDocumentResponse,
   GeneratePresentationRequest,
-  GenerateWikiRequest,
   ProductRequest,
   ProductResponse,
   RepoRequest,
@@ -35,7 +34,6 @@ import type {
 import {
   repoAdd,
   repoAddMany,
-  repoAllDocsText,
   repoDelete,
   repoDeleteDoc,
   repoDocs,
@@ -154,24 +152,6 @@ chrome.runtime.onMessage.addListener((message: GeneratePresentationRequest, _sen
         dataBase64,
         mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       } satisfies GenerateDocumentResponse);
-    } catch (e) {
-      sendResponse({ ok: false, error: String(e) } satisfies GenerateDocumentResponse);
-    }
-  })();
-  return true; // async response
-});
-
-// ----- Wiki generation: repo documents -> one self-contained HTML file (create_wiki tool). -----
-
-chrome.runtime.onMessage.addListener((message: GenerateWikiRequest, _sender, sendResponse) => {
-  if (message?.target !== 'offscreen' || message.type !== 'generate_wiki') return undefined;
-  (async () => {
-    try {
-      // Lazy import so marked/DOMPurify's wiki-template code only loads when requested.
-      const { buildWikiHtml } = await import('./wikiGen');
-      const html = buildWikiHtml(message.title, message.pages, message.lang);
-      const dataBase64 = btoa(unescape(encodeURIComponent(html)));
-      sendResponse({ ok: true, dataBase64, mimeType: 'text/html' } satisfies GenerateDocumentResponse);
     } catch (e) {
       sendResponse({ ok: false, error: String(e) } satisfies GenerateDocumentResponse);
     }
@@ -411,8 +391,6 @@ async function handleRepo(req: RepoRequest): Promise<RepoResponse> {
         return { ok: true };
       case 'docs':
         return { ok: true, result: await repoDocs(req.repo) };
-      case 'docsText':
-        return { ok: true, result: await repoAllDocsText(req.repo) };
       case 'deleteDoc':
         return { ok: true, result: await repoDeleteDoc(req.repo, req.docId) };
       case 'export':

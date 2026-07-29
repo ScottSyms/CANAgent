@@ -17,16 +17,13 @@ import type {
   GenerateDocumentRequest,
   GenerateDocumentResponse,
   GeneratePresentationRequest,
-  GenerateWikiRequest,
   SlideSpec,
   ProductMeta,
   ProductRequest,
   ProductResponse,
   RepoRequest,
   RepoResponse,
-  RepoDocText,
   RepoKind,
-  WikiPage,
 } from '../shared/messages';
 
 // pdf.js needs a DOM/worker context the service worker can't provide, so it
@@ -92,16 +89,6 @@ export async function generatePresentation(
     return { ok: false, error: `Could not start the presentation generator: ${String(e)}` };
   }
   const request: GeneratePresentationRequest = { target: 'offscreen', type: 'generate_presentation', title, slides };
-  return sendOffscreen<GenerateDocumentResponse>(request);
-}
-
-export async function generateWiki(title: string, pages: WikiPage[], lang?: 'en' | 'fr'): Promise<GenerateDocumentResponse> {
-  try {
-    await ensureOffscreen();
-  } catch (e) {
-    return { ok: false, error: `Could not start the wiki generator: ${String(e)}` };
-  }
-  const request: GenerateWikiRequest = { target: 'offscreen', type: 'generate_wiki', title, pages, lang };
   return sendOffscreen<GenerateDocumentResponse>(request);
 }
 
@@ -222,12 +209,6 @@ export function repoDelete(repo: string): Promise<RepoResponse> {
 
 export function repoDocs(repo: string): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'docs', repo });
-}
-
-/** Every document's full text (chunks reassembled), for wiki generation. */
-export async function repoDocsText(repo: string): Promise<RepoDocText[]> {
-  const res = await repoRequest({ target: 'offscreen-repo', op: 'docsText', repo });
-  return res.ok && Array.isArray(res.result) ? (res.result as RepoDocText[]) : [];
 }
 
 export function repoDeleteDoc(repo: string, docId: string): Promise<RepoResponse> {

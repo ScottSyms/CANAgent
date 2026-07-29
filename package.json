@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build && vite build --config vite.content.config.ts && vite build --config vite.webmcp.config.ts && vite build --config vite.pointer.config.ts && vite build --config vite.learn.config.ts",
+    "build": "vite build && vite build --config vite.content.config.ts && vite build --config vite.webmcp.config.ts && vite build --config vite.pointer.config.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

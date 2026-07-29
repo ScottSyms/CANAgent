@@ -144,7 +144,6 @@ The status pill is color-coded: neutral **Idle**, purple **Thinking…/Using bro
   - **A− / A+** — adjust the panel's text size (scales the whole sidebar); click the percentage to reset to 100%. The choice persists across sessions.
   - **Save conversation** — download the current conversation as an HTML file.
   - **Undo last exchange** — remove the last question/answer pair and put your message back in the composer to edit.
-  - **Learn mode** — start/stop a recorder that captures interactions on the current site, shows a live intent preview on Alt+hover, and saves a reusable playbook when you stop it.
 - **⚙ Settings** — opens the full-tab **Workspace**, where all configuration lives: Models (connection + advanced), Skills, Knowledge bases, Tools, Memory, Automations, Products, Projects, and Settings (language, playbook library, Backup & Restore).
 
 <p align="center">
