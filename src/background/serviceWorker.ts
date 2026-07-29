@@ -169,7 +169,7 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 // auto-downloaded file names) on the Automations page.
 if (chrome.notifications) {
   chrome.notifications.onClicked.addListener((notificationId) => {
-    void chrome.tabs.create({ url: chrome.runtime.getURL('workspace.html#automations') });
+    void chrome.tabs.create({ url: chrome.runtime.getURL('workspace.html#automations'), active: false });
     chrome.notifications.clear(notificationId);
   });
 }
