@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { TestConnectionResponse } from '../shared/messages';
 import type { Settings } from '../shared/types';
+import { getSettingsForEdit, saveSettings } from '../background/storage';
 import { useT } from '../sidebar/i18n';
 import { Group } from './SettingsControls';
 
@@ -14,10 +15,14 @@ export function ModelSection() {
   const [testResult, setTestResult] = useState<TestConnectionResponse | null>(null);
   const [testing, setTesting] = useState(false);
   const [saved, setSaved] = useState(false);
+  // When an encryption vault exists but is locked, secrets can't be decrypted or
+  // safely overwritten — gate the form and point the user at the Vault section.
+  const [locked, setLocked] = useState(false);
 
   useEffect(() => {
-    chrome.storage.local.get('ba_settings').then((r) => {
-      if (r.ba_settings) setSettings(r.ba_settings as Settings);
+    getSettingsForEdit().then(({ settings, locked }) => {
+      setSettings(settings);
+      setLocked(locked);
     });
   }, []);
 
@@ -45,28 +50,36 @@ export function ModelSection() {
     }
   };
 
-  // Patch-save: merge only this section's fields over a fresh read, so saving
-  // here can't revert what AdvancedSettingsSection (same page, same storage
-  // object) saved after this component mounted.
+  // Patch-save: merge only this section's fields over a fresh (decrypted) read,
+  // so saving here can't revert what AdvancedSettingsSection (same page, same
+  // storage object) saved after this component mounted. saveSettings re-encrypts
+  // secrets when a vault is unlocked, and throws if it is locked.
   const save = async () => {
-    const r = await chrome.storage.local.get('ba_settings');
-    const current = (r.ba_settings as Settings | undefined) ?? EMPTY;
-    await chrome.storage.local.set({
-      ba_settings: {
+    try {
+      const { settings: current } = await getSettingsForEdit();
+      await saveSettings({
         ...current,
         baseUrl: settings.baseUrl.trim(),
         apiKey: settings.apiKey.trim(),
         model: settings.model.trim(),
         ideogramApiKey: settings.ideogramApiKey?.trim() || undefined,
         apiVersion: settings.apiVersion?.trim() || undefined,
-      },
-    });
-    setSaved(true);
+      });
+      setSaved(true);
+    } catch (e) {
+      setTestResult({ ok: false, detail: e instanceof Error ? e.message : String(e) });
+    }
   };
 
   return (
     <div class="ws-model-page">
       <h2>{t('settings.tabModel')}</h2>
+
+      {locked && (
+        <div class="banner banner-error">
+          🔒 The encryption vault is locked. Unlock it in the Vault section to view or change connection settings.
+        </div>
+      )}
 
       <Group title={t('settings.groupConnection')} desc={t('settings.note')}>
         <label class="field">
@@ -129,10 +142,10 @@ export function ModelSection() {
       {saved && <div class="banner banner-ok">{t('settings.saved')}</div>}
 
       <div class="settings-actions">
-        <button class="btn" onClick={test} disabled={!valid || testing}>
+        <button class="btn" onClick={test} disabled={!valid || testing || locked}>
           {testing ? t('settings.testing') : t('settings.testConnection')}
         </button>
-        <button class="btn btn-primary" onClick={save} disabled={!valid}>
+        <button class="btn btn-primary" onClick={save} disabled={!valid || locked}>
           {t('common.save')}
         </button>
       </div>

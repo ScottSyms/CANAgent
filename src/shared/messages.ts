@@ -67,6 +67,17 @@ export interface ApprovalContext {
   authMethod?: string;
   /** Whether auth credentials are configured for this capability. */
   authConfigured: boolean;
+  // --- Approval binding (specification.md §12.4) --------------------------
+  // An approval is bound to a specific action so granting one thing can't
+  // authorize a materially different one, and so a stale approval expires.
+  /** Unique id for this approval, echoed into the audit trail. */
+  approvalId?: string;
+  /** The concrete target the action would affect. */
+  target?: { tabId?: number; origin?: string };
+  /** Redacted preview of the tool args this approval authorizes. */
+  params?: Record<string, unknown>;
+  /** Epoch ms after which this approval is no longer valid. */
+  expiresAt?: number;
 }
 
 /** Events pushed from the background to every connected sidebar. */

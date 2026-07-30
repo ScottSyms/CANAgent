@@ -22,6 +22,7 @@ import type {
   Skill,
 } from '../shared/types';
 import type { LlmMessage } from './llmProvider';
+import { getVaultState, vaultDecrypt, vaultEncrypt } from './vault';
 
 const SETTINGS_KEY = 'ba_settings';
 const SITES_KEY = 'ba_sites';
@@ -82,15 +83,63 @@ export interface StoredConversation {
 }
 
 // chrome.storage.local only — the API key must never sync across devices.
+// When an encryption vault is configured (see vault.ts), secret fields are
+// stored as `enc:v1:` envelopes; getSettings transparently decrypts them, and a
+// *locked* vault yields null so the agent stays inert until the user unlocks.
 export async function getSettings(): Promise<Settings | null> {
   const result = await chrome.storage.local.get(SETTINGS_KEY);
   const settings = result[SETTINGS_KEY] as Settings | undefined;
   if (!settings || !settings.baseUrl || !settings.apiKey || !settings.model) return null;
-  return settings;
+  const apiKey = await vaultDecrypt(settings.apiKey);
+  if (apiKey === null) return null; // encrypted but vault locked/erased
+  const out: Settings = { ...settings, apiKey };
+  if (settings.ideogramApiKey) {
+    const ideo = await vaultDecrypt(settings.ideogramApiKey);
+    out.ideogramApiKey = ideo ?? undefined;
+  }
+  return out;
+}
+
+/**
+ * Decrypted settings for the editor UI — no completeness gate, and it reports
+ * whether the vault is locked so the form can prompt for unlock instead of
+ * showing (and later overwriting) blank secrets.
+ */
+export async function getSettingsForEdit(): Promise<{ settings: Settings; locked: boolean }> {
+  const result = await chrome.storage.local.get(SETTINGS_KEY);
+  const settings = (result[SETTINGS_KEY] as Settings | undefined) ?? { baseUrl: '', apiKey: '', model: '' };
+  if (settings.apiKey) {
+    const dec = await vaultDecrypt(settings.apiKey);
+    if (dec === null) return { settings: { ...settings, apiKey: '' }, locked: true };
+    settings.apiKey = dec;
+  }
+  if (settings.ideogramApiKey) {
+    const dec = await vaultDecrypt(settings.ideogramApiKey);
+    settings.ideogramApiKey = dec ?? undefined;
+  }
+  return { settings, locked: false };
 }
 
 export async function saveSettings(settings: Settings): Promise<void> {
-  await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
+  // A locked vault must not be written through — vaultEncrypt would pass the
+  // secret through in plaintext and clobber the ciphertext. Callers gate on this.
+  if ((await getVaultState()) === 'locked') {
+    throw new Error('The encryption vault is locked. Unlock it before saving connection settings.');
+  }
+  const toStore: Settings = { ...settings, apiKey: await vaultEncrypt(settings.apiKey) };
+  if (settings.ideogramApiKey) toStore.ideogramApiKey = await vaultEncrypt(settings.ideogramApiKey);
+  await chrome.storage.local.set({ [SETTINGS_KEY]: toStore });
+}
+
+/**
+ * Re-store the current settings so their secrets become ciphertext under a
+ * newly-unlocked vault. Called right after a vault is created, to seal a key the
+ * user had entered while still in plaintext.
+ */
+export async function sealSecretsAtRest(): Promise<void> {
+  const { settings, locked } = await getSettingsForEdit();
+  if (locked || !settings.apiKey) return;
+  await saveSettings(settings);
 }
 
 export async function getCapabilities(): Promise<CapabilityRegistryEntry[]> {

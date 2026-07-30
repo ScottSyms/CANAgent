@@ -39,7 +39,9 @@ interface Backup {
 export function BackupRestoreSection({ defaultOpen = false }: { defaultOpen?: boolean } = {}) {
   const t = useT();
   const [busy, setBusy] = useState(false);
-  const [includeKey, setIncludeKey] = useState(true);
+  // Default to EXCLUDING the API key from exports (technical-debt.md §6.1): a
+  // backup should not carry a bearer secret in plaintext unless deliberately opted in.
+  const [includeKey, setIncludeKey] = useState(false);
   const [includeConversations, setIncludeConversations] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
 

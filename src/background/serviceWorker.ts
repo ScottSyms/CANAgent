@@ -252,6 +252,11 @@ function broadcast(event: BackgroundEvent): void {
 // by whichever panel is open.
 const runtime = new AgentRuntime(broadcast);
 
+// The service worker may have just been revived after eviction. If a task was
+// cut off mid-run, restore its thread and working state from the in-flight
+// checkpoint so a reconnecting panel repaints it (see AgentRuntime.recoverInFlight).
+void runtime.recoverInFlight();
+
 // A panel connects: register its port, immediately replay the full current
 // state (so a reconnecting panel re-paints), then translate each command into a
 // runtime method call. This switch is the authoritative list of actions the UI

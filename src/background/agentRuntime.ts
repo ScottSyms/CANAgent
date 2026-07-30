@@ -23,7 +23,12 @@
 
 import type { ApprovalContext } from '../shared/messages';
 import type { CapabilityRegistryEntry } from '../shared/capabilities';
-import { isTrustedForAutoApproval, resolveAuth } from '../shared/capabilities';
+import { resolveAuth } from '../shared/capabilities';
+import { classifyTool, evaluatePolicy, isApprovalStillValid } from '../shared/policy';
+import { redactArgs, sha256Hex, type AuditEvent } from '../shared/audit';
+import { appendAuditEvent, deleteAuditLog } from '../shared/auditLog';
+import { clearCheckpoint, readCheckpoint, writeCheckpoint } from '../shared/checkpoint';
+import { buildResumePrompt, MAX_RECOVERY_ATTEMPTS, reconcileTabs, shouldAutoResume } from '../shared/recovery';
 import type { BackgroundEvent } from '../shared/messages';
 import { MEMORY_TOOL_DEFINITIONS, TOOL_DEFINITIONS } from '../shared/schemas';
 import { LANGUAGE_STORAGE_KEY, resolveLang, translate, type LangPref } from '../sidebar/i18n';
@@ -118,6 +123,7 @@ import {
 const SOFT_STEP_BUDGET = 20; // default tool-iteration budget per task
 const STEP_BUDGET_EXTENSION = 10; // granted when the plan still has work left
 const HARD_STEP_CEILING = 40; // absolute cap to bound cost
+const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000; // spec §7.4 default approval timeout
 const SITES_PROMPT_LIMIT = 25;
 // LLM_TIMEOUT_MS now lives in llmProvider (applied per request attempt) and is
 // imported for the "timed out" message below.
@@ -273,28 +279,13 @@ function encodeUtf8Base64(text: string): string {
   return btoa(binary);
 }
 
-/** Tools that mutate page or browser state and therefore need user approval. */
-const APPROVAL_REQUIRED = new Set([
-  'click_element',
-  'fill_input',
-  'submit_form',
-  'run_javascript', // arbitrary code in the page — always gated
-  'press_keys', // keyboard input can submit/trigger — gated
-  'click_at', // coordinate click can commit actions — gated
-  'drag', // drag can reorder/drop — gated
-  'save_app_playbook', // persists a reusable playbook — confirm before storing
-  'save_as_skill', // persists a new reusable skill from this task — confirm before storing
-  'get_all_tab_contents', // reading all tabs needs explicit approval per spec
-  'call_mcp_tool', // invokes an external MCP method — gated like any outbound action
-  'call_webmcp_tool', // invokes an in-page tool with the user's session — gated
-  'draft_email', // creates a server-side Outlook draft — confirm first
-  'schedule_task', // creates persistent background automation — confirm first
-  'cancel_scheduled_task', // deletes persistent automation — confirm first
-]);
+// Which tools need approval is now decided by evaluatePolicy() over the
+// TOOL_ACTION_CLASS table in shared/policy.ts (the inspectable, diff-reviewable
+// replacement for the old APPROVAL_REQUIRED Set). See executeToolCall.
 
 /**
- * Tools that stay frictionless in an attended chat (not in APPROVAL_REQUIRED)
- * but must never run unattended. Empty since the DuckDB data engine (whose
+ * Tools that stay frictionless in an attended chat but must never run unattended.
+ * Empty since the DuckDB data engine (whose
  * query_data ran model-authored SQL) was removed; kept as the gate for any
  * future tool with the same "fine attended, not fine silent" shape.
  */
@@ -593,6 +584,8 @@ export class AgentRuntime {
   private pauseRequested = false;
   private pauseWaiter: (() => void) | null = null;
   private pendingApproval: PendingApproval | null = null;
+  /** Auto-resume attempts for the current interruption; carried through checkpoints, capped by MAX_RECOVERY_ATTEMPTS. */
+  private recoveryAttempts = 0;
   private unattended = false;
   private unattendedApprovalBlocked = false;
   /** The scheduled task/trigger title driving the current unattended run, for tagging Products with their source. */
@@ -857,6 +850,7 @@ export class AgentRuntime {
     const epoch = ++this.taskEpoch;
     // Reset per-task working state.
     this.lastUserText = text;
+    this.recoveryAttempts = 0; // a fresh turn is not a recovery
     this.plan = null;
     this.findings = [];
     this.pendingToolImages = [];
@@ -875,6 +869,21 @@ export class AgentRuntime {
     this.taskConversationStart = this.conversation.length;
     this.taskActivityStart = this.activities.length;
 
+    await this.runAndSettle(taskText, snapshots, epoch, settings);
+  }
+
+  /**
+   * Run the agent loop for one task and settle the shared state afterwards.
+   * Shared by a fresh user turn (handleUserMessage) and a recovered/resumed task
+   * (resumeInterruptedTask) so both go through identical error handling, cleanup,
+   * checkpoint clearing, and autosave.
+   */
+  private async runAndSettle(
+    taskText: string,
+    snapshots: Array<{ dataUrl: string; title: string; url: string }>,
+    epoch: number,
+    settings: Settings,
+  ): Promise<void> {
     try {
       await this.runLoop(taskText, snapshots, epoch);
     } catch (err) {
@@ -901,6 +910,8 @@ export class AgentRuntime {
         this.abortController = null;
         this.running = false;
         if (this.status !== 'error') this.setStatus('idle');
+        // The task settled — no in-flight work to recover.
+        void clearCheckpoint();
         // Autosave every settled turn (including errored ones) so the thread
         // survives service-worker eviction and shows up in History.
         void this.persistCurrentConversation();
@@ -991,6 +1002,167 @@ export class AgentRuntime {
     } catch {
       // A failed autosave must never break the chat; the next turn retries.
     }
+  }
+
+  /**
+   * Write the narrow in-flight checkpoint (which step, current plan/findings) so
+   * a service-worker eviction mid-task is recoverable. Written each step; a stale
+   * epoch (task was superseded) writes nothing. Best-effort and cheap — one
+   * storage.local.set, well inside the spec §16 250 ms checkpoint target.
+   */
+  private async persistInFlightCheckpoint(epoch: number): Promise<void> {
+    if (this.taskEpoch !== epoch || !this.currentConversationId) return;
+    try {
+      await writeCheckpoint({
+        conversationId: this.currentConversationId,
+        epoch,
+        stepsUsed: this.stepsUsed,
+        stepBudget: this.stepBudget,
+        plan: this.plan,
+        findings: this.findings,
+        lastTaskUrl: this.lastTaskUrl || undefined,
+        lastUserText: this.lastUserText,
+        unattended: this.unattended,
+        recoveryAttempts: this.recoveryAttempts,
+        updatedAt: new Date().toISOString(),
+      });
+      void this.audit({ eventType: 'CHECKPOINT_WRITTEN', unattended: this.unattended });
+    } catch {
+      // Checkpointing is best-effort; a failure just means less to recover.
+    }
+  }
+
+  /**
+   * Called once on service-worker startup. A present in-flight checkpoint means a
+   * task was cut off mid-run (it is cleared when a task settles). Recovery
+   * (specification.md §9.3): restore the thread and working state, then — up to
+   * MAX_RECOVERY_ATTEMPTS — auto-resume the loop to finish the plan. The resume is
+   * safe because read-only tools are idempotent and every state-changing tool is
+   * re-gated by the policy engine (renewed approval), and the resume prompt tells
+   * the model not to assume any prior send/submit/modify completed. Past the cap,
+   * or with no model configured, we restore state and let the user drive.
+   */
+  async recoverInFlight(): Promise<void> {
+    let cp;
+    try {
+      cp = await readCheckpoint();
+    } catch {
+      return;
+    }
+    if (!cp) return;
+    if (this.running) return; // a fresh task already owns the runtime; it clears the checkpoint on settle
+    if (cp.unattended) {
+      // Unattended runs are re-fired by their scheduled task / trigger, not resumed here.
+      await clearCheckpoint();
+      return;
+    }
+
+    const attempts = cp.recoveryAttempts ?? 0;
+    if (!shouldAutoResume(attempts)) {
+      await clearCheckpoint(); // give up auto-resume; leave the thread restored for manual continuation
+      try {
+        await this.loadConversation(cp.conversationId);
+      } catch {
+        return;
+      }
+      void this.audit({ eventType: 'RECOVERY', unattended: false });
+      this.notice(
+        `This task was interrupted and could not be auto-resumed after ${attempts} attempt(s). ` +
+          'Your progress and findings are restored above — send a message to continue manually.',
+      );
+      return;
+    }
+
+    await this.resumeInterruptedTask(cp, attempts);
+  }
+
+  /**
+   * Restore an interrupted task and re-drive the loop to completion. Mirrors the
+   * epoch/state setup of handleUserMessage, but *preserves* the checkpointed plan,
+   * findings, and step count (rather than resetting them) so the agent continues
+   * instead of restarting, and enters through runAndSettle so cleanup/autosave are
+   * identical. The synthetic resume turn (buildResumePrompt) carries the original
+   * task plus the tab-reconciliation note.
+   */
+  private async resumeInterruptedTask(cp: NonNullable<Awaited<ReturnType<typeof readCheckpoint>>>, attempts: number): Promise<void> {
+    const settings = await getSettings();
+    if (!settings) {
+      // No model to resume with — restore the thread so nothing is lost.
+      await clearCheckpoint();
+      try {
+        await this.loadConversation(cp.conversationId);
+      } catch {
+        return;
+      }
+      this.notice('A task was interrupted, but no model is configured to resume it. Open Settings, then send a message to continue.');
+      return;
+    }
+
+    // Capture the pages the task had open *before* loadConversation reopens the group.
+    let expectedTabs: Array<{ url: string; title: string }> = [];
+    try {
+      expectedTabs = (await getConversation(cp.conversationId))?.groupUrls ?? [];
+    } catch {
+      // no body / no group — reconciliation just reports nothing missing
+    }
+    try {
+      await this.loadConversation(cp.conversationId);
+    } catch {
+      await clearCheckpoint();
+      return; // body was pruned/deleted — nothing to resume
+    }
+
+    // The checkpoint holds the most recent working state (loadConversation restored
+    // the last-persisted turn's, which is older) — override with it.
+    this.plan = cp.plan;
+    this.findings = cp.findings;
+    this.lastTaskUrl = cp.lastTaskUrl ?? '';
+    this.lastUserText = cp.lastUserText;
+
+    let reconcileNote = '';
+    try {
+      const openUrls = (await browser.listTabs()).map((t) => t.url).filter((u): u is string => !!u);
+      reconcileNote = reconcileTabs(expectedTabs, openUrls).note;
+    } catch {
+      // tab enumeration failed; proceed without a reconciliation note
+    }
+
+    this.recoveryAttempts = attempts + 1;
+    void this.audit({ eventType: 'RECOVERY', unattended: false });
+    this.notice(
+      `Resuming an interrupted task (attempt ${this.recoveryAttempts} of ${MAX_RECOVERY_ATTEMPTS}) — ` +
+        'restoring your plan and continuing where it left off.',
+    );
+
+    // Task-epoch/state setup, as handleUserMessage — but preserving plan/findings/steps.
+    this.running = true;
+    this.stopRequested = false;
+    this.pauseRequested = false;
+    this.abortController = new AbortController();
+    const epoch = ++this.taskEpoch;
+    this.stepsUsed = cp.stepsUsed;
+    this.stepBudget = cp.stepBudget;
+    const budget = deriveStepBudget(settings.maxSteps);
+    this.stepExtension = budget.extension;
+    this.stepCeiling = budget.ceiling;
+    this.pendingToolImages = [];
+    this.toolCallCount = 0;
+    this.reflectionsDone = 0;
+    this.reflectionIssues = [];
+    this.planNudgesDone = 0;
+    this.authResumedOrigins.clear();
+    this.setDistill(false);
+    this.emit({ type: 'plan_update', plan: this.planView() });
+    this.taskConversationStart = this.conversation.length;
+    this.taskActivityStart = this.activities.length;
+
+    // Persist the incremented attempt count NOW, before the first model call, so an
+    // eviction during resume still advances the counter (bounding a task that dies
+    // repeatedly on its first step to MAX_RECOVERY_ATTEMPTS rather than forever).
+    await this.persistInFlightCheckpoint(epoch);
+
+    const resumePrompt = buildResumePrompt(cp.lastUserText, cp.stepsUsed, reconcileNote);
+    await this.runAndSettle(resumePrompt, [], epoch, settings);
   }
 
   /** Live http(s) pages in this conversation's tab group (for save/restore). Empty when no group. */
@@ -1437,6 +1609,7 @@ export class AgentRuntime {
   /** Delete a saved conversation; if it is the active one, detach so a new id is allocated next. */
   async deleteConversation(id: string): Promise<void> {
     await deleteStoredConversation(id);
+    void deleteAuditLog(id); // drop this thread's audit trail alongside its body
     if (this.currentConversationId === id) {
       this.currentConversationId = null;
       this.currentConversationProjectId = undefined;
@@ -1743,10 +1916,17 @@ export class AgentRuntime {
     if (this.pendingApproval?.requestId === requestId) {
       const pending = this.pendingApproval;
       this.pendingApproval = null;
-      if (approved && rememberForSession && pending.approvalContext?.toolName) {
+      // Approval binding: a "yes" arriving after the card expired must not
+      // authorize the action — the agent has to ask again (spec §12.4 / §7.4).
+      const stillValid = isApprovalStillValid(pending.approvalContext?.expiresAt, Date.now());
+      const effective = approved && stillValid;
+      if (approved && !stillValid) {
+        this.notice('That approval expired before it was granted — the agent will need to ask again.');
+      }
+      if (effective && rememberForSession && pending.approvalContext?.toolName) {
         void addSessionApproval(pending.approvalContext.toolName);
       }
-      pending.resolve(approved);
+      pending.resolve(effective);
     }
   }
 
@@ -1964,6 +2144,9 @@ export class AgentRuntime {
       }
 
       this.stepsUsed++;
+      // Persist a narrow in-flight checkpoint at the step boundary so a
+      // service-worker eviction mid-task is recoverable (see recoverInFlight).
+      void this.persistInFlightCheckpoint(epoch);
       await this.executeToolCalls(reply.tool_calls, epoch);
       if (this.aborted(epoch)) return;
       this.flushToolImages();
@@ -2468,10 +2651,12 @@ export class AgentRuntime {
    * Execute a single tool call and return its result as the string the model
    * will see. This is the central dispatch switch — one `case` per tool in
    * `TOOL_DEFINITIONS`, mostly delegating to `browserToolAdapter`, `mcpClient`,
-   * or the offscreen RAG store. Before running, it logs a UI activity row and,
-   * for any tool in `APPROVAL_REQUIRED`, blocks on `requestApproval` using the
-   * model-supplied `reason` (declining returns a sentinel the model can react
-   * to). Tools return strings, never throw, so the loop always gets a result.
+   * or the offscreen RAG store. Before running, it logs a UI activity row, runs
+   * evaluatePolicy() (shared/policy.ts), and for a `needs_approval` decision
+   * blocks on `requestApproval` using the model-supplied `reason` (declining
+   * returns a sentinel the model can react to). Every outcome — policy decision,
+   * approval, execution — is appended to the audit log. Tools return strings,
+   * never throw, so the loop always gets a result.
    */
   private async executeToolCall(call: LlmToolCall): Promise<string> {
     const name = call.function.name;
@@ -2513,51 +2698,119 @@ export class AgentRuntime {
       };
     }
 
-    if (this.unattended && UNATTENDED_BLOCKED_TOOLS.has(name)) {
-      this.unattendedApprovalBlocked = true;
-      this.finishActivity(activity, 'denied', 'Not permitted to run unattended');
-      return `Error: tool "${name}" is not permitted to run unattended in a scheduled task or trigger.`;
+    // ----- Policy decision (single source of truth for allow/deny/approval).
+    // Page content never reaches evaluatePolicy — pages only ever feed name/args.
+    const target = await this.resolveTarget(args);
+    const inputDigest = await sha256Hex(JSON.stringify(args));
+    const decision = evaluatePolicy({
+      tool: name,
+      actionClass: classifyTool(name, READ_ONLY_TOOLS),
+      attended: !this.unattended,
+      trustLevel: approvalContext?.trustLevel,
+      capabilityKind: approvalContext?.capabilityKind,
+      sessionApprovedTools: await getSessionApprovals(),
+      unattendedBlockedTools: UNATTENDED_BLOCKED_TOOLS,
+    });
+    void this.audit({
+      eventType: 'POLICY_DECISION', tool: name, target, inputDigest,
+      policyDecision: decision.kind === 'allow' ? 'allow' : decision.kind === 'deny' ? 'deny' : 'needs_approval',
+      policyRule: decision.kind === 'deny' ? decision.rule : undefined,
+      unattended: this.unattended,
+    });
+
+    if (decision.kind === 'deny') {
+      if (this.unattended) this.unattendedApprovalBlocked = true;
+      this.finishActivity(activity, 'denied', decision.rule);
+      void this.audit({ eventType: 'TOOL_DENIED', tool: name, target, inputDigest, policyRule: decision.rule, result: 'denied', unattended: this.unattended });
+      return `Error: tool "${name}" is not permitted (${decision.rule}). Do not retry it; ask the user or finish with what you have.`;
     }
 
-    // Trust gating: low-trust capabilities' tools always require approval,
-    // even if the tool is normally read-only.
-    const needsApproval = APPROVAL_REQUIRED.has(name) ||
-      (approvalContext && !isTrustedForAutoApproval(approvalContext.capabilityKind as any, approvalContext.trustLevel as any));
-
-    // Session-level approval persistence: skip approval for tools the user
-    // already approved for this session.
-    let skipApproval = false;
-    if (needsApproval) {
-      const sessionApproved = await getSessionApprovals();
-      if (sessionApproved.has(name)) skipApproval = true;
-    }
-
-    if (needsApproval && !skipApproval) {
+    let approvalId: string | null = null;
+    if (decision.kind === 'needs_approval') {
+      // Non-read tools are already denied unattended (rule above); this guards
+      // the low-trust-read case, which can't get an interactive approval either.
       if (this.unattended) {
         this.unattendedApprovalBlocked = true;
         this.finishActivity(activity, 'denied', 'Approval-gated tool cannot run unattended');
         return `Error: tool "${name}" requires user approval and cannot run unattended in a scheduled task.`;
       }
+      approvalId = crypto.randomUUID();
       const reason =
         typeof args.reason === 'string' && args.reason.trim()
           ? args.reason.trim()
           : 'The agent wants to perform this action.';
-      const approved = await this.requestApproval(reason, this.describeAction(name, args), approvalContext);
+      // Bind the approval to this exact action so granting it can't authorize a
+      // different one, and so it expires (specification.md §12.4 / §7.4).
+      const boundContext: ApprovalContext = {
+        ...approvalContext,
+        toolName: name,
+        authConfigured: approvalContext?.authConfigured ?? false,
+        approvalId,
+        target,
+        params: redactArgs(args),
+        expiresAt: Date.now() + APPROVAL_TIMEOUT_MS,
+      };
+      void this.audit({ eventType: 'APPROVAL_REQUESTED', tool: name, target, inputDigest, approvalId, unattended: false });
+      const approved = await this.requestApproval(reason, this.describeAction(name, args), boundContext);
       if (!approved) {
         this.finishActivity(activity, 'denied', 'User denied this action');
+        void this.audit({ eventType: 'APPROVAL_DENIED', tool: name, target, inputDigest, approvalId, result: 'denied', unattended: false });
         return 'The user denied this action. Do not retry it; ask the user how to proceed or finish with what you have.';
       }
+      void this.audit({ eventType: 'APPROVAL_GRANTED', tool: name, target, inputDigest, approvalId, unattended: false });
     }
 
     this.setStatus('acting', name);
+    const startedAt = Date.now();
     try {
       const result = await this.dispatchTool(name, args);
       this.finishActivity(activity, 'ok');
+      void this.audit({
+        eventType: 'TOOL_EXECUTED', tool: name, target, inputDigest,
+        outputDigest: await sha256Hex(result), approvalId, policyDecision: 'allow',
+        result: 'success', durationMs: Date.now() - startedAt, unattended: this.unattended,
+      });
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.finishActivity(activity, 'error', message);
+      void this.audit({
+        eventType: 'TOOL_EXECUTED', tool: name, target, inputDigest,
+        outputDigest: await sha256Hex(message), approvalId, policyDecision: 'allow',
+        result: 'error', durationMs: Date.now() - startedAt, unattended: this.unattended,
+      });
       return `Error from ${name}: ${message}`;
+    }
+  }
+
+  /** Best-effort resolve of a tool's target tab origin, for audit + approval binding. */
+  private async resolveTarget(args: Record<string, unknown>): Promise<{ tabId?: number; origin?: string } | undefined> {
+    const tabId = Number(args.tabId);
+    if (!Number.isFinite(tabId)) return undefined;
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      return { tabId, origin: tab.url ? new URL(tab.url).origin : undefined };
+    } catch {
+      return { tabId };
+    }
+  }
+
+  /**
+   * Append one audit event (append-only, digests-only — never payloads). Fills
+   * the boilerplate id/timestamp/conversationId; callers supply the rest.
+   * Best-effort: a failed audit write must never break a tool call, so this is
+   * always `void`ed and swallows its own errors.
+   */
+  private async audit(partial: Omit<AuditEvent, 'eventId' | 'timestamp' | 'conversationId'>): Promise<void> {
+    try {
+      await appendAuditEvent({
+        eventId: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        conversationId: this.currentConversationId,
+        ...partial,
+      });
+    } catch {
+      // Audit is best-effort; never let it surface into the task.
     }
   }
 
