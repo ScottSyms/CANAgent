@@ -7,7 +7,8 @@ vi.mock('./llmProvider', () => ({
   resolveModelForRole: (s: unknown) => s,
 }));
 
-import { extractOneDoc, tagDocChunks } from './graphExtract';
+import { extractOneDoc, summarizeCommunities, tagDocChunks } from './graphExtract';
+import { emptyDocGraph, mergeExtraction } from '../shared/docGraph';
 import type { Settings } from '../shared/types';
 
 afterEach(() => complete.mockReset());
@@ -53,5 +54,36 @@ describe('extractOneDoc', () => {
   it('returns empty extraction when the model returns non-JSON', async () => {
     complete.mockResolvedValue({ content: 'sorry, I cannot' });
     expect(await extractOneDoc(S, 'x', new Set())).toEqual({ entities: [], relations: [] });
+  });
+});
+
+describe('summarizeCommunities', () => {
+  it('summarizes each detected community and grounds it to community evidence', async () => {
+    const g = emptyDocGraph();
+    // Three densely-connected members (>= COMMUNITY_MIN_SIZE) so a community forms.
+    mergeExtraction(
+      g,
+      {
+        entities: [],
+        relations: [
+          { from: 'A', to: 'B', relation: 'r', evidence: ['s1'] },
+          { from: 'B', to: 'C', relation: 'r', evidence: ['s2'] },
+          { from: 'A', to: 'C', relation: 'r', evidence: ['s3'] },
+        ],
+      },
+      'doc-1',
+    );
+    complete.mockResolvedValue({ content: '{"title":"Cluster","summary":"They relate.","evidence":["s1","not-in-cluster"]}' });
+
+    const comms = await summarizeCommunities(S, g);
+    expect(comms).toHaveLength(1);
+    expect(comms[0].title).toBe('Cluster');
+    expect(comms[0].nodeIds.length).toBe(3);
+    expect(comms[0].evidenceSentenceIds).toEqual(['s1']); // fabricated id filtered out
+  });
+
+  it('returns [] when there are no communities', async () => {
+    expect(await summarizeCommunities(S, emptyDocGraph())).toEqual([]);
+    expect(complete).not.toHaveBeenCalled();
   });
 });

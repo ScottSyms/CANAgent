@@ -32,6 +32,20 @@ export interface GraphEdge {
   evidenceSentenceIds: string[];
 }
 
+/**
+ * A summarized community of related entities (GraphRAG "global" sensemaking): a
+ * cluster of densely-connected nodes with a synthesized theme. Grounded to
+ * sentence ids like every other graph claim.
+ */
+export interface CommunitySummary {
+  id: string;
+  title: string;
+  summary: string;
+  /** Member node ids. */
+  nodeIds: string[];
+  evidenceSentenceIds: string[];
+}
+
 export interface DocGraph {
   nodes: GraphNode[];
   edges: GraphEdge[];
@@ -40,6 +54,8 @@ export interface DocGraph {
   embedModel?: string;
   /** Doc ids already folded in — lets extraction resume without reprocessing. */
   processedDocIds: string[];
+  /** Corpus-level topic communities + summaries (computed after extraction). */
+  communities?: CommunitySummary[];
   updatedAt: string;
 }
 

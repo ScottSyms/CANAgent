@@ -455,6 +455,26 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'global_search',
+      description:
+        'Answer a corpus-level question about a repository (notebook) by synthesizing across its knowledge-graph ' +
+        'themes. Use for broad "what are the main themes / how does it all fit together / summarize the whole ' +
+        'collection" questions that no single passage or entity answers. Returns each theme with a summary and ' +
+        '[[sentence-id]] evidence; synthesize an answer across them and cite the ids. Requires a graph with themes ' +
+        'to have been built.',
+      parameters: {
+        type: 'object',
+        properties: {
+          repo: { type: 'string', description: 'Repository (notebook) name whose themes to synthesize.' },
+          query: { type: 'string', description: 'The corpus-level question.' },
+        },
+        required: ['repo', 'query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'list_repos',
       description: 'List the on-device repositories with their document and chunk counts.',
       parameters: { type: 'object', properties: {}, required: [] },
@@ -1059,6 +1079,7 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   'read_tab_group',
   'search_repo',
   'search_graph',
+  'global_search',
   'list_repos',
   'use_skill',
   'set_plan',

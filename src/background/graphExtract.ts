@@ -13,7 +13,8 @@ import type { Settings } from '../shared/types';
 import type { LlmMessage } from './llmProvider';
 import { complete, resolveModelForRole } from './llmProvider';
 import { extractJsonObject } from './scopedSubtask';
-import { coerceExtraction, emptyDocGraph, mergeExtraction, type DocExtraction, type DocGraph } from '../shared/docGraph';
+import { coerceExtraction, emptyDocGraph, mergeExtraction, type CommunitySummary, type DocExtraction, type DocGraph } from '../shared/docGraph';
+import { detectCommunities, renderCommunityForModel } from '../shared/graphCommunities';
 import { docChunks, graphGet, graphSet, repoDocs } from './offscreenClient';
 
 const PER_DOC_BUDGET_CHARS = 12000;
@@ -74,6 +75,61 @@ export async function extractOneDoc(
     return { entities: [], relations: [] };
   }
   return coerceExtraction(obj, validIds);
+}
+
+const MAX_COMMUNITIES = 12;
+const COMMUNITY_MIN_SIZE = 3;
+const COMMUNITY_SYSTEM_PROMPT =
+  'You summarize a cluster of related entities from a document corpus into a theme. The cluster is given as ' +
+  'entities and relationships, each tagged with [[id]] evidence markers. Using ONLY the given text, return ONLY JSON: ' +
+  '{"title":string,"summary":string,"evidence":string[]}. title = a short theme name (3–6 words). ' +
+  'summary = 2–3 sentences on what this cluster is about and how its members relate. ' +
+  'evidence = the ids (WITHOUT brackets) of the most important supporting sentences shown in the [[ ]] markers.';
+
+/**
+ * Detect topic communities and synthesize a grounded theme for each (GraphRAG
+ * "global" sensemaking). One model call per community; failures skip that
+ * community rather than aborting. Evidence ids are validated against the
+ * community's own sentences.
+ */
+export async function summarizeCommunities(settings: Settings, graph: DocGraph, signal?: AbortSignal): Promise<CommunitySummary[]> {
+  const raw = detectCommunities(graph, { minSize: COMMUNITY_MIN_SIZE, maxCommunities: MAX_COMMUNITIES });
+  const out: CommunitySummary[] = [];
+  for (const comm of raw) {
+    if (signal?.aborted) break;
+    const { text, evidenceIds } = renderCommunityForModel(graph, comm);
+    if (!text) continue;
+    const valid = new Set(evidenceIds);
+    try {
+      const reply = await complete(
+        resolveModelForRole(settings, 'utility'),
+        [
+          { role: 'system', content: COMMUNITY_SYSTEM_PROMPT },
+          { role: 'user', content: text },
+        ],
+        undefined,
+        signal,
+      );
+      const obj = extractJsonObject(reply.content ?? '') as { title?: unknown; summary?: unknown; evidence?: unknown };
+      const title = typeof obj.title === 'string' ? obj.title.trim() : '';
+      const summary = typeof obj.summary === 'string' ? obj.summary.trim() : '';
+      const evidence = Array.isArray(obj.evidence)
+        ? obj.evidence.filter((x): x is string => typeof x === 'string' && valid.has(x))
+        : [];
+      if (title || summary) {
+        out.push({
+          id: comm.id,
+          title: title || 'Untitled theme',
+          summary,
+          nodeIds: comm.nodeIds,
+          evidenceSentenceIds: evidence.length > 0 ? evidence : evidenceIds.slice(0, 8),
+        });
+      }
+    } catch {
+      // Model/parse failure for this community — skip it.
+    }
+  }
+  return out;
 }
 
 export interface GraphBuildProgress {
@@ -142,6 +198,18 @@ export async function buildRepoGraph(
     const setRes = await graphSet(repo, graph); // checkpoint after every doc
     if (!setRes.ok) return { ok: false, error: setRes.error };
   }
+
+  // Once every document is folded in, cluster the graph into themes (global
+  // sensemaking). Re-summarize when new docs were processed, on an explicit
+  // rebuild, or when no themes exist yet.
+  const allProcessed = graph.processedDocIds.length >= docs.length;
+  const shouldSummarize = allProcessed && !opts.signal?.aborted && (opts.rebuild || !graph.communities || todo.length > 0);
+  if (shouldSummarize && graph.nodes.length > 0) {
+    graph.communities = await summarizeCommunities(settings, graph, opts.signal);
+    const setRes = await graphSet(repo, graph);
+    if (!setRes.ok) return { ok: false, error: setRes.error };
+  }
+
   report();
   return { ok: true, graph };
 }

@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { DocGraph, GraphEdge, GraphNode } from '../shared/docGraph';
+import type { CommunitySummary, DocGraph, GraphEdge, GraphNode } from '../shared/docGraph';
 import type { Citation } from '../shared/types';
 import { CitationView } from './CitationView';
 
-// The per-notebook knowledge graph: a Build/Rebuild control with live progress,
-// a lightweight radial concept map, and a click-through to the exact source
-// sentences behind any entity — resolved deterministically via sentence ids.
+// The per-notebook knowledge graph: a Build/Rebuild control with live progress, a
+// radial concept map (nodes colored by theme), the extracted themes (graph
+// communities, GraphRAG "global" sensemaking), and click-through from any entity
+// or theme to the exact source sentences behind it.
 
 interface GetResponse {
   ok: boolean;
@@ -25,6 +26,17 @@ interface EvidenceResponse {
 
 const MAP_NODES = 24;
 const SIZE = 320;
+// One color per theme (cycled), from the app's chip palette.
+const PALETTE = [
+  '--chip-blue-fg',
+  '--chip-green-fg',
+  '--chip-violet-fg',
+  '--chip-amber-fg',
+  '--chip-teal-fg',
+  '--chip-pink-fg',
+  '--chip-red-fg',
+  '--chip-slate-fg',
+];
 
 function layout(graph: DocGraph): { nodes: GraphNode[]; edges: GraphEdge[]; pos: Map<string, { x: number; y: number }> } {
   const deg = new Map<string, number>();
@@ -46,12 +58,21 @@ function layout(graph: DocGraph): { nodes: GraphNode[]; edges: GraphEdge[]; pos:
   return { nodes, edges, pos };
 }
 
+/** node id → theme index, for coloring. */
+function communityIndex(graph: DocGraph): Map<string, number> {
+  const idx = new Map<string, number>();
+  (graph.communities ?? []).forEach((c, i) => c.nodeIds.forEach((id) => idx.set(id, i)));
+  return idx;
+}
+const colorForIndex = (i: number | undefined) => (i === undefined ? 'var(--accent-dim)' : `var(${PALETTE[i % PALETTE.length]})`);
+
 export function GraphPanel({ repo }: { repo: string }) {
   const [graph, setGraph] = useState<DocGraph | null>(null);
   const [docCount, setDocCount] = useState(0);
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<GraphNode | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<{ title: string; summary: string; color?: string } | null>(null);
   const [evidence, setEvidence] = useState<Citation[]>([]);
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
   const pollRef = useRef<number | null>(null);
@@ -79,7 +100,6 @@ export function GraphPanel({ repo }: { repo: string }) {
   const build = async (rebuild: boolean) => {
     setError(null);
     setBuilding(true);
-    // Poll for per-document progress while the (long) build request is in flight.
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(() => void refresh(), 2000) as unknown as number;
     try {
@@ -95,27 +115,34 @@ export function GraphPanel({ repo }: { repo: string }) {
     void refresh();
   };
 
-  const selectNode = async (node: GraphNode) => {
-    setSelected(node);
+  const showEvidence = async (title: string, summary: string, ids: string[], color?: string) => {
+    setDetail({ title, summary, color });
     setEvidence([]);
-    if (node.evidenceSentenceIds.length === 0) return;
+    if (ids.length === 0) return;
     try {
-      const res = (await chrome.runtime.sendMessage({
-        type: 'notebook_graph_evidence',
-        repo,
-        sentenceIds: node.evidenceSentenceIds,
-      })) as EvidenceResponse;
+      const res = (await chrome.runtime.sendMessage({ type: 'notebook_graph_evidence', repo, sentenceIds: ids })) as EvidenceResponse;
       setEvidence(res?.citations ?? []);
     } catch {
       setEvidence([]);
     }
   };
 
+  const selectNode = (node: GraphNode, colorIdx?: number) => {
+    setSelectedId(node.id);
+    void showEvidence(`${node.label} · ${node.type}`, node.summary, node.evidenceSentenceIds, colorForIndex(colorIdx));
+  };
+  const selectTheme = (c: CommunitySummary, i: number) => {
+    setSelectedId(null);
+    void showEvidence(c.title, c.summary, c.evidenceSentenceIds, colorForIndex(i));
+  };
+
   const border = '1px solid var(--border)';
   const processed = graph?.processedDocIds.length ?? 0;
   const nodeCount = graph?.nodes.length ?? 0;
   const edgeCount = graph?.edges.length ?? 0;
+  const communities = graph?.communities ?? [];
   const view = graph ? layout(graph) : null;
+  const comIdx = graph ? communityIndex(graph) : new Map<string, number>();
 
   return (
     <div class="graph-panel" style={{ margin: '6px 0 10px', padding: '10px', border, borderRadius: '8px' }}>
@@ -147,15 +174,16 @@ export function GraphPanel({ repo }: { repo: string }) {
 
       {!building && nodeCount === 0 && (
         <p class="settings-note">
-          No graph yet — build one to extract entities and relationships from this notebook's documents, each grounded to
-          its source sentences.
+          No graph yet — build one to extract entities, relationships, and themes from this notebook's documents, each
+          grounded to its source sentences.
         </p>
       )}
 
       {view && nodeCount > 0 && (
         <>
           <p class="settings-note" style={{ marginTop: '6px' }}>
-            {nodeCount} entities · {edgeCount} relationships{processed < docCount ? ` · ${processed}/${docCount} docs processed` : ''}
+            {nodeCount} entities · {edgeCount} relationships · {communities.length} themes
+            {processed < docCount ? ` · ${processed}/${docCount} docs processed` : ''}
           </p>
           <svg
             viewBox={`0 0 ${SIZE} ${SIZE}`}
@@ -169,16 +197,13 @@ export function GraphPanel({ repo }: { repo: string }) {
             })}
             {view.nodes.map((n) => {
               const p = view.pos.get(n.id)!;
-              const isSel = selected?.id === n.id;
+              const isSel = selectedId === n.id;
+              const ci = comIdx.get(n.id);
+              const color = colorForIndex(ci);
               return (
-                <g key={n.id} style={{ cursor: 'pointer' }} onClick={() => void selectNode(n)}>
-                  <circle cx={p.x} cy={p.y} r={isSel ? 7 : 5} fill={isSel ? 'var(--accent)' : 'var(--accent-dim)'} stroke="var(--accent)" stroke-width="1" />
-                  <text
-                    x={p.x}
-                    y={p.y - 9}
-                    text-anchor="middle"
-                    style={{ fontSize: '9px', fill: 'var(--text)', pointerEvents: 'none' }}
-                  >
+                <g key={n.id} style={{ cursor: 'pointer' }} onClick={() => selectNode(n, ci)}>
+                  <circle cx={p.x} cy={p.y} r={isSel ? 7 : 5} fill={color} stroke={isSel ? 'var(--accent)' : color} stroke-width={isSel ? 2 : 1} />
+                  <text x={p.x} y={p.y - 9} text-anchor="middle" style={{ fontSize: '9px', fill: 'var(--text)', pointerEvents: 'none' }}>
                     {n.label.length > 18 ? n.label.slice(0, 17) + '…' : n.label}
                   </text>
                 </g>
@@ -186,15 +211,39 @@ export function GraphPanel({ repo }: { repo: string }) {
             })}
           </svg>
 
-          {selected && (
-            <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: border }}>
-              <div style={{ fontWeight: 700, fontSize: '13px' }}>
-                {selected.label} <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>· {selected.type}</span>
+          {communities.length > 0 && (
+            <div style={{ marginTop: '8px' }}>
+              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', marginBottom: '4px' }}>Themes</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {communities.map((c, i) => (
+                  <button
+                    key={c.id}
+                    style={{
+                      textAlign: 'left',
+                      fontSize: '13px',
+                      padding: '6px 8px',
+                      border,
+                      borderRadius: '6px',
+                      background: 'var(--bg-card)',
+                      color: 'var(--text)',
+                      cursor: 'pointer',
+                      borderLeft: `3px solid ${colorForIndex(i)}`,
+                    }}
+                    onClick={() => selectTheme(c, i)}
+                  >
+                    <strong>{c.title}</strong>
+                    <span style={{ color: 'var(--text-dim)' }}> · {c.nodeIds.length} entities</span>
+                  </button>
+                ))}
               </div>
-              {selected.summary && <p class="settings-note" style={{ fontSize: '13px' }}>{selected.summary}</p>}
-              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', margin: '6px 0 2px' }}>
-                Evidence
-              </div>
+            </div>
+          )}
+
+          {detail && (
+            <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: border, borderLeft: detail.color ? `3px solid ${detail.color}` : undefined, paddingLeft: detail.color ? '8px' : undefined }}>
+              <div style={{ fontWeight: 700, fontSize: '13px' }}>{detail.title}</div>
+              {detail.summary && <p class="settings-note" style={{ fontSize: '13px' }}>{detail.summary}</p>}
+              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', margin: '6px 0 2px' }}>Evidence</div>
               {evidence.length === 0 ? (
                 <p class="settings-note">Loading evidence…</p>
               ) : (
@@ -202,16 +251,7 @@ export function GraphPanel({ repo }: { repo: string }) {
                   {evidence.map((c) => (
                     <button
                       key={c.sentenceId}
-                      style={{
-                        textAlign: 'left',
-                        fontSize: '12px',
-                        padding: '5px 7px',
-                        border,
-                        borderRadius: '6px',
-                        background: 'var(--bg-card)',
-                        color: 'var(--text)',
-                        cursor: 'pointer',
-                      }}
+                      style={{ textAlign: 'left', fontSize: '12px', padding: '5px 7px', border, borderRadius: '6px', background: 'var(--bg-card)', color: 'var(--text)', cursor: 'pointer' }}
                       title={`${c.docName} — click to view in context`}
                       onClick={() => setActiveCitation(c)}
                     >

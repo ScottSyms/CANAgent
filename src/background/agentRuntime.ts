@@ -87,6 +87,7 @@ import { DEFAULT_RESEARCH_LIMITS } from '../shared/jobs';
 import { deriveStepBudget, findSimilarLesson, parseLesson, parseReflectionVerdict, parseSummaryArray, relevantLessons, repairToolPairing, withMergedSystemState } from './loopHelpers';
 import { generateDocument, generatePresentation, graphGet as repoGraphGet, productSave, repoDeleteDoc, repoDocs, repoList, repoSearch } from './offscreenClient';
 import { selectSubgraph, renderSubgraphForModel, type DocGraph } from '../shared/docGraph';
+import { renderCommunitiesForModel } from '../shared/graphCommunities';
 import { resolveSentenceCitations } from './sentenceResolve';
 import { normalizeSlides } from '../shared/slides';
 import type { SearchHit } from '../shared/vectorSearch';
@@ -366,6 +367,7 @@ Working method:
 - Some web pages expose their own in-page tools via WebMCP (navigator.modelContext). On the active tab, call list_webmcp_tools to discover them; when one matches the task, prefer call_webmcp_tool over hand-driving the page UI.
 - Local repositories: the user can save pages into named on-device repositories (OPFS). Use add_to_repo to capture the current page or this conversation's tab group into a repo, and search_repo to retrieve relevant passages from a repo and answer from them — cite each passage's page name and URL. Prefer search_repo for questions about pages the user has saved; list_repos shows what exists.
 - A repository may also have an extracted knowledge graph. For questions about how entities relate, who/what is connected, or that need facts spread across several documents (multi-hop), call search_graph on that repo before or alongside search_repo; it returns the relevant entities and relationships, each with [[sentence-id]] evidence. If it reports no graph has been built, fall back to search_repo.
+- For broad, corpus-level questions about a repository — "what are the main themes", "summarize this whole collection", "how does it all fit together" — call global_search on that repo: it returns the notebook's themes (graph communities) with [[sentence-id]] evidence to synthesize across. Use search_repo/search_graph for specific facts; use global_search for the big picture.
 - search_repo passages are returned as sentences each prefixed with a [[sentence-id]] token. When a statement in your answer is supported by a retrieved sentence, cite it inline by copying that sentence's [[sentence-id]] token verbatim immediately after the statement (e.g. "Model selection is done at the application level [[doc-73:c42:s4#8f31ca]]."). Cite only ids that appear in the current search results — never invent, guess, or reuse an id from earlier; unresolved ids are removed automatically. This is in addition to the Source tabs list, not a replacement.
 - The user can reference a repository (typing #) or a bookmarked page (typing @) in their message; when they do, an explicit instruction is attached — act on it directly: search_repo that exact repository, or open and read that exact URL rather than web-searching for it.
 - Endpoint-first Microsoft 365 rule: for Outlook mail, Outlook calendar, Teams meeting, SharePoint, and OneDrive retrieval, ALWAYS use the dedicated endpoint-backed tools before browser/page automation. Do not use search_web, open_url, get_tab_content, Outlook/Office web UI playbooks, or DOM automation for these data sources unless the endpoint tool returns an explicit endpoint/auth error. Mail, calendar, and draft creation are backed by Microsoft Graph (OAuth) and need a one-time Connect in Settings → Knowledge bases → Mailbox; SharePoint/OneDrive files remain a direct cookie-session call needing no separate connect step.
@@ -2935,6 +2937,19 @@ export class AgentRuntime {
         for (const e of sub.edges) for (const id of e.evidenceSentenceIds) evidence.add(id);
         await this.registerGraphCitations(repo, evidence);
         return renderSubgraphForModel(sub);
+      }
+      case 'global_search': {
+        const repo = String(args.repo);
+        const gRes = await repoGraphGet(repo);
+        const graph = gRes.ok ? (gRes.result as DocGraph | null) : null;
+        const communities = graph?.communities ?? [];
+        if (communities.length === 0) {
+          return `No themes have been built for "${repo}" yet. Build or refresh its knowledge graph from the Knowledge page (themes are computed after extraction), or use search_graph / search_repo.`;
+        }
+        const evidence = new Set<string>();
+        for (const c of communities) for (const id of c.evidenceSentenceIds) evidence.add(id);
+        await this.registerGraphCitations(repo, evidence);
+        return renderCommunitiesForModel(communities);
       }
       case 'list_repos': {
         const res = await repoList();
