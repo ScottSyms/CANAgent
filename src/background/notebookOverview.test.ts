@@ -48,9 +48,9 @@ describe('buildOverviewPrompt', () => {
 });
 
 describe('parseOverview', () => {
-  it('parses a well-formed reply', () => {
-    const out = parseOverview('{"overview":"## X\\ntext","keyTopics":["a","b"],"suggestedQuestions":["Q1?"]}');
-    expect(out).toEqual({ overviewMarkdown: '## X\ntext', keyTopics: ['a', 'b'], suggestedQuestions: ['Q1?'] });
+  it('parses a well-formed reply with title', () => {
+    const out = parseOverview('{"title":"Arctic Operations Guide","overview":"## X\\ntext","keyTopics":["a","b"],"suggestedQuestions":["Q1?"]}');
+    expect(out).toEqual({ title: 'Arctic Operations Guide', overviewMarkdown: '## X\ntext', keyTopics: ['a', 'b'], suggestedQuestions: ['Q1?'] });
   });
 
   it('tolerates code fences and prose around the JSON', () => {

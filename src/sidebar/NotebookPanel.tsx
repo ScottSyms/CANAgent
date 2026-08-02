@@ -91,6 +91,12 @@ export function NotebookPanel({ repo, onAsk }: { repo: string; onAsk?: (repo: st
         <p class="settings-note">No overview yet — generate one to see a summary, key topics, and suggested questions.</p>
       ) : (
         <>
+          {overview.title && (
+            <h3 style={{ margin: '8px 0 2px', fontSize: '15px', fontWeight: 700, color: 'var(--text)' }}>
+              {overview.title}
+            </h3>
+          )}
+
           <div style={{ fontSize: '13px', lineHeight: 1.5, marginTop: '8px' }}>
             <Markdown text={overview.overviewMarkdown} />
           </div>

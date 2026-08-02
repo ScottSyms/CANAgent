@@ -51,6 +51,7 @@ export default defineConfig({
         offscreen: 'offscreen.html',
         microphone: 'microphone.html',
         workspace: 'workspace.html',
+        notebooks: 'notebooks.html',
         serviceWorker: 'src/background/serviceWorker.ts',
       },
       output: {

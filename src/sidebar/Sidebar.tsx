@@ -461,7 +461,7 @@ export function Sidebar() {
             class="icon-btn"
             aria-label={t('header.knowledge')}
             title={t('header.knowledge')}
-            onClick={() => chrome.tabs.create({ url: chrome.runtime.getURL('workspace.html#knowledge') })}
+            onClick={() => chrome.tabs.create({ url: chrome.runtime.getURL('notebooks.html') })}
           >
             <IconKnowledge />
           </button>

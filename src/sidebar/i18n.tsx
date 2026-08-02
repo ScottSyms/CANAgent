@@ -127,6 +127,8 @@ const EN: Dict = {
   'context.stale': 'stale',
   // repositories (knowledge bases)
   'repos.title': 'Knowledge bases',
+  'notebooks.tabNotebooks': 'Notebooks',
+  'notebooks.tabIndexing': 'Indexing',
   'repos.note':
     'On-device document stores the agent can search. It fills them when you add pages, and answers from them on demand. Stored only on this device.',
   'repos.loading': 'Loading…',
@@ -310,6 +312,11 @@ const EN: Dict = {
   'modelProfiles.endpointUrl': 'Endpoint base URL',
   'modelProfiles.apiKey': 'API key',
   'modelProfiles.model': 'Model',
+  'modelProfiles.protocol': 'Protocol',
+  'modelProfiles.protocolChatCompletions': 'Chat Completions (OpenAI-compatible)',
+  'modelProfiles.protocolResponses': 'Responses (OpenAI GPT-5.x, Grok)',
+  'modelProfiles.protocolAnthropic': 'Anthropic Messages (Claude, Qwen)',
+  'modelProfiles.protocolGemini': 'Gemini native',
   'modelProfiles.temperature': 'Temperature (optional)',
   'modelProfiles.maxTokens': 'Max tokens (optional)',
   'modelProfiles.privacyTier': 'Privacy tier',
@@ -352,6 +359,13 @@ const EN: Dict = {
   'settings.endpointUrl': 'Endpoint base URL',
   'settings.apiKey': 'API key',
   'settings.model': 'Model',
+  'settings.protocol': 'Protocol',
+  'settings.protocolNote':
+    'Which wire format the endpoint speaks. Chat Completions covers DeepSeek, GLM, MiniMax, Kimi, Ollama, vLLM, and Azure OpenAI. Use Responses for GPT-5.x/Grok, Anthropic Messages for Claude/Qwen, or Gemini native for Gemini.',
+  'settings.protocolChatCompletions': 'Chat Completions (OpenAI-compatible)',
+  'settings.protocolResponses': 'Responses (OpenAI GPT-5.x, Grok)',
+  'settings.protocolAnthropic': 'Anthropic Messages (Claude, Qwen)',
+  'settings.protocolGemini': 'Gemini native',
   'settings.ideogramApiKey': 'Ideogram API key (optional)',
   'settings.apiVersion': 'Azure API version (optional)',
   'settings.apiVersionNote':
@@ -545,6 +559,8 @@ const FR: Dict = {
   'context.stale': 'périmé',
   // repositories (knowledge bases)
   'repos.title': 'Bases de connaissances',
+  'notebooks.tabNotebooks': 'Carnets',
+  'notebooks.tabIndexing': 'Indexation',
   'repos.note':
     'Stockages de documents sur l’appareil que l’agent peut interroger. Elles se remplissent lorsque vous ajoutez des pages, et l’agent y répond à la demande. Stockées uniquement sur cet appareil.',
   'repos.loading': 'Chargement…',
@@ -728,6 +744,11 @@ const FR: Dict = {
   'modelProfiles.endpointUrl': 'URL de base du point de terminaison',
   'modelProfiles.apiKey': 'Clé d’API',
   'modelProfiles.model': 'Modèle',
+  'modelProfiles.protocol': 'Protocole',
+  'modelProfiles.protocolChatCompletions': 'Chat Completions (compatible OpenAI)',
+  'modelProfiles.protocolResponses': 'Responses (OpenAI GPT-5.x, Grok)',
+  'modelProfiles.protocolAnthropic': 'Anthropic Messages (Claude, Qwen)',
+  'modelProfiles.protocolGemini': 'Gemini natif',
   'modelProfiles.temperature': 'Température (facultatif)',
   'modelProfiles.maxTokens': 'Jetons maximum (facultatif)',
   'modelProfiles.privacyTier': 'Niveau de confidentialité',
@@ -770,6 +791,13 @@ const FR: Dict = {
   'settings.endpointUrl': 'URL de base du point de terminaison',
   'settings.apiKey': 'Clé d’API',
   'settings.model': 'Modèle',
+  'settings.protocol': 'Protocole',
+  'settings.protocolNote':
+    'Le format de protocole parlé par le point de terminaison. Chat Completions couvre DeepSeek, GLM, MiniMax, Kimi, Ollama, vLLM et Azure OpenAI. Utilisez Responses pour GPT-5.x/Grok, Anthropic Messages pour Claude/Qwen, ou Gemini natif pour Gemini.',
+  'settings.protocolChatCompletions': 'Chat Completions (compatible OpenAI)',
+  'settings.protocolResponses': 'Responses (OpenAI GPT-5.x, Grok)',
+  'settings.protocolAnthropic': 'Anthropic Messages (Claude, Qwen)',
+  'settings.protocolGemini': 'Gemini natif',
   'settings.ideogramApiKey': 'Clé d’API Ideogram (facultatif)',
   'settings.apiVersion': 'Version d’API Azure (facultatif)',
   'settings.apiVersionNote':

@@ -28,7 +28,8 @@ export const DEFAULT_PROMPTS: Record<PromptKey, string> = {
   notebookOverview:
     'You are creating a "notebook" overview of a collection of documents for a reader who has not read them. ' +
     'Base everything ONLY on the provided document list and sample passages — do not invent facts. ' +
-    'Return ONLY JSON in this exact shape: {"overview": string, "keyTopics": string[], "suggestedQuestions": string[]}. ' +
+    'Return ONLY JSON in this exact shape: {"title": string, "overview": string, "keyTopics": string[], "suggestedQuestions": string[]}. ' +
+    'title: a concise, descriptive, all-encompassing title (3–7 words) for this repository/notebook collection. ' +
     'overview: 2–4 short markdown paragraphs on what this collection is about, its main themes, and notable entities. ' +
     'keyTopics: 4–8 short topic labels (2–4 words each). ' +
     'suggestedQuestions: 4–6 specific questions a reader could ask that these documents can answer.',

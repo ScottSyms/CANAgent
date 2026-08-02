@@ -2,7 +2,6 @@ import { useEffect, useState } from 'preact/hooks';
 import type { BackgroundEvent } from '../shared/messages';
 import type { AgentStatus, ChatMessageView, DataExport, FileArtifact, PlanView } from '../shared/types';
 import { CapabilitiesSection } from '../sidebar/CapabilitiesSection';
-import { RepositoriesSection } from '../sidebar/RepositoriesSection';
 import { SkillsSection } from '../sidebar/SkillsSection';
 import { useT } from '../sidebar/i18n';
 import { AutomationsPage } from './AutomationsPage';
@@ -20,8 +19,8 @@ import { ProjectsPage } from './ProjectsPage';
 import { AuditPage } from './AuditPage';
 import { JobsPage } from './JobsPage';
 
-type WorkspaceView = 'chat' | 'projects' | 'knowledge' | 'tools' | 'skills' | 'models' | 'memory' | 'automations' | 'jobs' | 'products' | 'audit' | 'data' | 'image' | 'settings';
-const VALID_VIEWS: WorkspaceView[] = ['chat', 'projects', 'knowledge', 'tools', 'skills', 'models', 'memory', 'automations', 'jobs', 'products', 'audit', 'data', 'image', 'settings'];
+type WorkspaceView = 'chat' | 'projects' | 'tools' | 'skills' | 'models' | 'memory' | 'automations' | 'jobs' | 'products' | 'audit' | 'data' | 'image' | 'settings';
+const VALID_VIEWS: WorkspaceView[] = ['chat', 'projects', 'tools', 'skills', 'models', 'memory', 'automations', 'jobs', 'products', 'audit', 'data', 'image', 'settings'];
 
 function initialView(): WorkspaceView {
   const fromHash = location.hash.slice(1) as WorkspaceView;
@@ -99,15 +98,6 @@ export function Workspace() {
     switch (view) {
       case 'projects':
         return <ProjectsPage />;
-      case 'knowledge':
-        return (
-          <RepositoriesSection
-            onAsk={(repo, question) => {
-              setInput(`Using the "${repo}" knowledge base: ${question}`);
-              setView('chat');
-            }}
-          />
-        );
       case 'tools':
         return <CapabilitiesSection defaultOpen />;
       case 'skills':
@@ -181,7 +171,6 @@ export function Workspace() {
         <nav class="ws-nav">
           <button class={`ws-nav-btn ${view === 'chat' ? 'is-active' : ''}`} onClick={() => setView('chat')}>{t('workspace.nav.chat')}</button>
           <button class={`ws-nav-btn ${view === 'projects' ? 'is-active' : ''}`} onClick={() => setView('projects')}>{t('workspace.nav.projects')}</button>
-          <button class={`ws-nav-btn ${view === 'knowledge' ? 'is-active' : ''}`} onClick={() => setView('knowledge')}>{t('workspace.nav.knowledge')}</button>
           <button class={`ws-nav-btn ${view === 'memory' ? 'is-active' : ''}`} onClick={() => setView('memory')}>{t('workspace.nav.memory')}</button>
           <button class={`ws-nav-btn ${view === 'automations' ? 'is-active' : ''}`} onClick={() => setView('automations')}>{t('workspace.nav.automations')}</button>
           <button class={`ws-nav-btn ${view === 'jobs' ? 'is-active' : ''}`} onClick={() => setView('jobs')}>Jobs</button>
@@ -200,9 +189,8 @@ export function Workspace() {
         </span>
       </header>
       <div class="ws-body">
-        {/* The Knowledge Base is a dedicated, full-width page — this transcript+composer
-            pane is chat context for every other view and isn't useful there. */}
-        {view !== 'knowledge' && (
+        {/* The sidebar is chat context for every view and isn't useful on dedicated pages. */}
+        {view !== 'data' && view !== 'image' && (
           <aside class="ws-sidebar">
             <div class="ws-message-list">
               {messages.map((m, i) => (

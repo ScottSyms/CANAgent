@@ -297,3 +297,119 @@ html, body, #app { margin: 0; height: 100%; font-family: -apple-system, BlinkMac
 .ws-task-edit textarea { resize: vertical; }
 .ws-days { display: flex; flex-wrap: wrap; gap: 10px; }
 .ws-day { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; }
+
+/* --- Notebooks Master-Detail Layout -------------------------------------- */
+.ws-notebooks-page { display: flex; flex-direction: column; gap: 12px; height: 100%; }
+.ws-notebooks-header { margin-bottom: 4px; }
+.ws-notebooks-header h2 { margin: 0 0 4px; font-size: 18px; font-weight: 700; }
+
+.ws-notebook-layout { display: flex; gap: 16px; flex: 1; min-height: 520px; }
+
+/* Left Master List */
+.ws-notebook-master {
+  width: 300px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+}
+.ws-notebook-master-head { display: flex; gap: 6px; align-items: center; }
+.ws-notebook-search {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 12.5px;
+}
+.ws-notebook-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  flex: 1;
+}
+.ws-notebook-card {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+  text-align: left;
+  width: 100%;
+}
+.ws-notebook-card:hover { border-color: var(--accent); background: var(--brand-soft); }
+.ws-notebook-card.is-active { border-color: var(--accent); background: var(--brand-soft); box-shadow: 0 0 0 1px var(--accent); }
+.ws-notebook-card-icon { font-size: 18px; flex-shrink: 0; }
+.ws-notebook-card-info { flex: 1; min-width: 0; }
+.ws-notebook-card-title { font-weight: 600; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-notebook-card-meta { font-size: 11.5px; color: var(--text-dim); margin-top: 2px; }
+
+/* Right Detail Pane */
+.ws-notebook-detail {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+.ws-notebook-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.ws-notebook-detail-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ws-notebook-detail-title { margin: 0; font-size: 18px; font-weight: 700; color: var(--text); }
+.ws-notebook-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; background: var(--chip-slate-bg); color: var(--chip-slate-fg); }
+.ws-notebook-detail-meta { font-size: 12.5px; color: var(--text-dim); margin-top: 4px; }
+.ws-notebook-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.ws-notebook-subtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 8px; }
+.ws-notebook-subtab {
+  padding: 5px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.ws-notebook-subtab:hover { background: var(--bg-input); color: var(--text); }
+.ws-notebook-subtab.is-active { background: var(--accent); color: #fff; font-weight: 600; }
+
+.ws-notebook-subcontent { flex: 1; }
+
+/* Ingestion Tab Grid */
+.ws-indexing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.ws-indexing-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ws-indexing-card h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }

@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'preact/hooks';
-import type { ModelProfile, ModelRole, Settings } from '../shared/types';
+import type { ModelProfile, ModelProtocol, ModelRole, Settings } from '../shared/types';
 import { useT } from '../sidebar/i18n';
+
+const PROTOCOLS: Array<{ value: ModelProtocol; label: string }> = [
+  { value: 'chat-completions', label: 'settings.protocolChatCompletions' },
+  { value: 'responses', label: 'settings.protocolResponses' },
+  { value: 'anthropic-messages', label: 'settings.protocolAnthropic' },
+  { value: 'gemini-native', label: 'settings.protocolGemini' },
+];
 
 const ROLES: Array<{ role: Exclude<ModelRole, 'main'>; label: string; hint: string }> = [
   { role: 'utility', label: 'modelProfiles.utilityRole', hint: 'modelProfiles.utilityHint' },
@@ -206,6 +213,19 @@ export function ModelProfilesSection() {
           <label class="field">
               <span>{t('modelProfiles.model')}</span>
             <input type="text" placeholder="llama3" value={form.model} onInput={(e) => setForm({ ...form, model: (e.target as HTMLInputElement).value })} />
+          </label>
+          <label class="field">
+              <span>{t('modelProfiles.protocol')}</span>
+            <select
+              value={form.protocol ?? 'chat-completions'}
+              onChange={(e) => setForm({ ...form, protocol: (e.target as HTMLSelectElement).value as ModelProtocol })}
+            >
+              {PROTOCOLS.map((p) => (
+                <option key={p.value} value={p.value}>
+                  {t(p.label)}
+                </option>
+              ))}
+            </select>
           </label>
           <div class="field-row">
             <label class="field">

@@ -37,6 +37,7 @@ export function buildOverviewPrompt(sample: CorpusSample): string {
 }
 
 export interface ParsedOverview {
+  title?: string;
   overviewMarkdown: string;
   keyTopics: string[];
   suggestedQuestions: string[];
@@ -53,18 +54,19 @@ function strList(v: unknown, cap: number): string[] {
 
 /** Parse the synthesis model's JSON reply; tolerant of fences/prose (returns null if unusable). */
 export function parseOverview(raw: string): ParsedOverview | null {
-  let obj: { overview?: unknown; keyTopics?: unknown; suggestedQuestions?: unknown } | null;
+  let obj: { title?: unknown; overview?: unknown; keyTopics?: unknown; suggestedQuestions?: unknown } | null;
   try {
     obj = extractJsonObject(raw) as typeof obj; // throws when no JSON object is present
   } catch {
     return null;
   }
   if (!obj || typeof obj !== 'object') return null;
+  const title = typeof obj.title === 'string' ? obj.title.trim() : undefined;
   const overviewMarkdown = typeof obj.overview === 'string' ? obj.overview.trim() : '';
   const keyTopics = strList(obj.keyTopics, 12);
   const suggestedQuestions = strList(obj.suggestedQuestions, 8);
   if (!overviewMarkdown && keyTopics.length === 0 && suggestedQuestions.length === 0) return null;
-  return { overviewMarkdown, keyTopics, suggestedQuestions };
+  return { title: title || undefined, overviewMarkdown, keyTopics, suggestedQuestions };
 }
 
 /** A cached overview is stale when the repo's doc/chunk counts have moved since it was made. */

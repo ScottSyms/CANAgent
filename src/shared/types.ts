@@ -221,6 +221,16 @@ export interface Settings {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /**
+   * Which wire protocol `baseUrl` speaks. `'chat-completions'` (default,
+   * absent = this) covers any OpenAI-compatible /chat/completions endpoint —
+   * DeepSeek, GLM, MiniMax, Kimi, Ollama, vLLM, Azure OpenAI. `'responses'` is
+   * OpenAI's /responses API (GPT-5.x, Grok). `'anthropic-messages'` is
+   * Anthropic's /v1/messages API (Claude, Qwen deployments that mirror it).
+   * `'gemini-native'` is Gemini's generateContent endpoint. See
+   * src/background/adapters/ for the per-protocol request/response translation.
+   */
+  protocol?: ModelProtocol;
   /** Optional Ideogram API key used by the image-generation tool. */
   ideogramApiKey?: string;
   /**
@@ -355,6 +365,13 @@ export interface Settings {
 export type ModelRole = 'main' | 'utility' | 'reflection' | 'plan' | 'vision';
 
 /**
+ * The wire protocol a connection (top-level Settings or a ModelProfile)
+ * speaks. See the `Settings.protocol` doc comment above for what each value
+ * covers and src/background/adapters/ for the implementation.
+ */
+export type ModelProtocol = 'chat-completions' | 'responses' | 'anthropic-messages' | 'gemini-native';
+
+/**
  * An alternate named endpoint a role can be routed to — e.g. a small local
  * model (Ollama) for cheap background work (titles, reflection, RAG
  * paraphrase/rerank) while the main chat loop stays on a stronger model.
@@ -367,6 +384,8 @@ export interface ModelProfile {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Wire protocol this profile's baseUrl speaks. Absent = 'chat-completions' (today's behavior). */
+  protocol?: ModelProtocol;
   apiVersion?: string;
   temperature?: number;
   maxTokens?: number;
@@ -459,6 +478,8 @@ export interface ChatMessageView {
  * generated from so the UI can detect when it is stale.
  */
 export interface NotebookOverview {
+  /** Optional AI-generated all-encompassing title for the notebook collection. */
+  title?: string;
   overviewMarkdown: string;
   keyTopics: string[];
   suggestedQuestions: string[];
