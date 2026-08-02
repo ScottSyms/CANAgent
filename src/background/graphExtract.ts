@@ -25,6 +25,7 @@ import {
 } from '../shared/docGraph';
 import { detectCommunities, renderCommunityForModel } from '../shared/graphCommunities';
 import { docChunks, graphGet, graphSet, repoDocs } from './offscreenClient';
+import { resolvePrompt } from '../shared/promptDefaults';
 
 const PER_DOC_BUDGET_CHARS = 12000;
 // Cap on how many budget-sized windows one document is split into, so a
@@ -33,17 +34,6 @@ const PER_DOC_BUDGET_CHARS = 12000;
 // PDF — an improvement over the prior single-window (~2-3 page) coverage, not a
 // promise of full-document coverage for very large corpora.
 const MAX_WINDOWS_PER_DOC = 6;
-
-const SYSTEM_PROMPT =
-  'You extract a knowledge graph from ONE document. The document is given as a list of sentences, each prefixed ' +
-  'with a [[id]] marker. Identify the key entities and the relationships between them, using ONLY the given text. ' +
-  'For every entity and every relationship, cite the ids of the supporting sentences — the ids shown inside the ' +
-  '[[ ]] markers, WITHOUT the brackets. Return ONLY JSON of the form: ' +
-  '{"entities":[{"label":string,"type":string,"summary":string,"evidence":string[]}],' +
-  '"relations":[{"from":string,"to":string,"relation":string,"evidence":string[]}]}. ' +
-  'label = canonical entity name; type = short category (e.g. organization, system, person, concept); ' +
-  'summary = one sentence; relation = short verb phrase; from/to = entity labels that appear in your entities list. ' +
-  'Only cite ids that appear in the text; do not invent ids or facts.';
 
 /**
  * Split a document's chunks into budget-sized, sentence-tagged windows
@@ -154,7 +144,7 @@ export async function extractOneDoc(
   signal?: AbortSignal,
 ): Promise<ExtractOutcome> {
   const messages: LlmMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: resolvePrompt(settings.promptOverrides, 'graphExtraction') },
     { role: 'user', content: taggedText },
   ];
   const reply = await complete(resolveModelForRole(settings, 'utility'), messages, undefined, signal);
@@ -174,12 +164,6 @@ export async function extractOneDoc(
 
 const MAX_COMMUNITIES = 12;
 const COMMUNITY_MIN_SIZE = 3;
-const COMMUNITY_SYSTEM_PROMPT =
-  'You summarize a cluster of related entities from a document corpus into a theme. The cluster is given as ' +
-  'entities and relationships, each tagged with [[id]] evidence markers. Using ONLY the given text, return ONLY JSON: ' +
-  '{"title":string,"summary":string,"evidence":string[]}. title = a short theme name (3–6 words). ' +
-  'summary = 2–3 sentences on what this cluster is about and how its members relate. ' +
-  'evidence = the ids (WITHOUT brackets) of the most important supporting sentences shown in the [[ ]] markers.';
 
 /**
  * Detect topic communities and synthesize a grounded theme for each (GraphRAG
@@ -199,7 +183,7 @@ export async function summarizeCommunities(settings: Settings, graph: DocGraph, 
       const reply = await complete(
         resolveModelForRole(settings, 'utility'),
         [
-          { role: 'system', content: COMMUNITY_SYSTEM_PROMPT },
+          { role: 'system', content: resolvePrompt(settings.promptOverrides, 'communitySummary') },
           { role: 'user', content: text },
         ],
         undefined,

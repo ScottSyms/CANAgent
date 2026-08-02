@@ -135,6 +135,21 @@ describe('extractOneDoc', () => {
     complete.mockResolvedValue({ content: '{"entities":[],"relations":[]}' });
     expect(await extractOneDoc(S, 'x', new Set())).toEqual({ ok: false, reason: 'empty' });
   });
+
+  it('uses a promptOverrides.graphExtraction override for the system message, when set', async () => {
+    complete.mockResolvedValue({ content: '{"entities":[{"label":"X","type":"t","summary":"s","evidence":[]}],"relations":[]}' });
+    const withOverride = { promptOverrides: { graphExtraction: 'CUSTOM GRAPH PROMPT' } } as Settings;
+    await extractOneDoc(withOverride, 'x', new Set());
+    const messages = complete.mock.calls.at(-1)?.[1];
+    expect(messages[0]).toEqual({ role: 'system', content: 'CUSTOM GRAPH PROMPT' });
+  });
+
+  it('falls back to the built-in default system message with no override', async () => {
+    complete.mockResolvedValue({ content: '{"entities":[{"label":"X","type":"t","summary":"s","evidence":[]}],"relations":[]}' });
+    await extractOneDoc(S, 'x', new Set());
+    const messages = complete.mock.calls.at(-1)?.[1];
+    expect(messages[0].content).toContain('You extract a knowledge graph from ONE document');
+  });
 });
 
 describe('summarizeCommunities', () => {
@@ -165,5 +180,26 @@ describe('summarizeCommunities', () => {
   it('returns [] when there are no communities', async () => {
     expect(await summarizeCommunities(S, emptyDocGraph())).toEqual([]);
     expect(complete).not.toHaveBeenCalled();
+  });
+
+  it('uses a promptOverrides.communitySummary override for the system message, when set', async () => {
+    const g = emptyDocGraph();
+    mergeExtraction(
+      g,
+      {
+        entities: [],
+        relations: [
+          { from: 'A', to: 'B', relation: 'r', evidence: ['s1'] },
+          { from: 'B', to: 'C', relation: 'r', evidence: ['s2'] },
+          { from: 'A', to: 'C', relation: 'r', evidence: ['s3'] },
+        ],
+      },
+      'doc-1',
+    );
+    complete.mockResolvedValue({ content: '{"title":"T","summary":"S","evidence":[]}' });
+    const withOverride = { promptOverrides: { communitySummary: 'CUSTOM COMMUNITY PROMPT' } } as Settings;
+    await summarizeCommunities(withOverride, g);
+    const messages = complete.mock.calls.at(-1)?.[1];
+    expect(messages[0]).toEqual({ role: 'system', content: 'CUSTOM COMMUNITY PROMPT' });
   });
 });

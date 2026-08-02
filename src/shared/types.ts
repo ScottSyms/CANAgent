@@ -204,6 +204,19 @@ export interface LessonEntry {
  */
 export const DEFAULT_LOCAL_EMBED_MODEL = 'Xenova/all-MiniLM-L6-v2';
 
+/**
+ * The feature prompts a user may override (src/shared/promptDefaults.ts). Named
+ * after the feature they drive, not the underlying constant, so the mapping
+ * stays stable even if a background module's internal constant name changes.
+ */
+export type PromptKey =
+  | 'notebookOverview'
+  | 'graphExtraction'
+  | 'communitySummary'
+  | 'studioBriefing'
+  | 'studioFaq'
+  | 'studioStudyGuide';
+
 export interface Settings {
   baseUrl: string;
   apiKey: string;
@@ -236,6 +249,15 @@ export interface Settings {
   maxSteps?: number;
   /** Optional user instructions appended to the built-in system prompt. */
   systemPrompt?: string;
+  /**
+   * Per-feature prompt overrides — REPLACE (not append) the named default
+   * prompt when set. Covers only the notebook/graph/studio synthesis prompts
+   * (src/shared/promptDefaults.ts); the core agent system prompt and
+   * tool-behavior prompts (rerank, query-variant, reflection) are not
+   * user-editable, to avoid silently breaking tool-calling/citation behavior.
+   * A blank/whitespace-only override falls back to the default.
+   */
+  promptOverrides?: Partial<Record<PromptKey, string>>;
   /** Optional SharePoint base URL for the cookie-auth search tool. */
   sharepointBaseUrl?: string;
   /**
