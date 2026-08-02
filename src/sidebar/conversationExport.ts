@@ -9,7 +9,7 @@ import { saveFile } from './download';
 // module renders identically even if imported on its own.
 marked.setOptions({ gfm: true, breaks: true });
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -28,7 +28,7 @@ function splitSources(text: string): { body: string; sources: string | null } {
   return { body: text.slice(0, match.index).trimEnd(), sources: text.slice(match.index).trim() };
 }
 
-function renderMarkdown(text: string): string {
+export function renderMarkdown(text: string): string {
   return DOMPurify.sanitize(marked.parse(text, { async: false }));
 }
 
@@ -63,7 +63,7 @@ function renderFileArtifact(file: FileArtifact): string {
 }
 
 /** A numbered footnote list of the sentence-level citations for one answer. */
-function renderCitations(citations: Citation[]): string {
+export function renderCitations(citations: Citation[]): string {
   const items = citations
     .map((c, i) => {
       const page = c.page ? ` (p.${c.page})` : '';
@@ -115,7 +115,7 @@ function renderMessage(m: ChatMessageView): string {
   );
 }
 
-const STYLE = `
+export const STYLE = `
   :root { color-scheme: light dark; }
   body { margin: 0; padding: 24px; background: #f5f6f8; color: #1b1c1e;
     font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }

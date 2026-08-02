@@ -13,6 +13,9 @@ import { MailboxSection } from './MailboxSection';
 import { NotebookPanel } from './NotebookPanel';
 import { RepoUpload } from './RepoUpload';
 import { StudioPanel } from './StudioPanel';
+import { exportKnowledgeBaseHtml } from './knowledgeBaseExport';
+import type { DocGraph } from '../shared/docGraph';
+import type { Citation, NotebookOverview, StudioDoc } from '../shared/types';
 import { SharePointSection } from './SharePointSection';
 import { UploadBanner } from './UploadBanner';
 import { useT } from './i18n';
@@ -68,6 +71,7 @@ export function RepositoriesSection({ onAsk }: { onAsk?: (repo: string, question
   const [folderBusy, setFolderBusy] = useState<string | null>(null);
   const [folderStatus, setFolderStatus] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [exportBusy, setExportBusy] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -118,6 +122,45 @@ export function RepositoriesSection({ onAsk }: { onAsk?: (repo: string, question
     await chrome.runtime.sendMessage({ type: 'repo_doc_delete', repo, docId });
     await loadDocs(repo);
     void load(); // refresh doc/chunk counts
+  };
+
+  // Fetches this notebook's overview/graph/studio artifacts (whatever has been
+  // generated) and downloads a single self-contained HTML file. Resolves the
+  // graph's evidence sentence ids to real text via the same message GraphPanel
+  // uses for its evidence panel, so the export shows source text, not raw ids.
+  const exportKb = async (repo: string) => {
+    setExportBusy(repo);
+    try {
+      const [overviewRes, graphRes, studioRes] = await Promise.all([
+        chrome.runtime.sendMessage({ type: 'notebook_overview_get', repo }) as Promise<{ ok: boolean; overview: NotebookOverview | null }>,
+        chrome.runtime.sendMessage({ type: 'notebook_graph_get', repo }) as Promise<{ ok: boolean; graph: DocGraph | null }>,
+        chrome.runtime.sendMessage({ type: 'notebook_studio_get', repo }) as Promise<{ ok: boolean; doc: StudioDoc }>,
+      ]);
+      const graph = graphRes?.graph ?? null;
+      const evidenceIds = graph
+        ? [
+            ...new Set([
+              ...graph.nodes.flatMap((n) => n.evidenceSentenceIds),
+              ...graph.edges.flatMap((e) => e.evidenceSentenceIds),
+              ...(graph.communities ?? []).flatMap((c) => c.evidenceSentenceIds),
+            ]),
+          ]
+        : [];
+      const evidenceRes = evidenceIds.length
+        ? ((await chrome.runtime.sendMessage({ type: 'notebook_graph_evidence', repo, sentenceIds: evidenceIds })) as {
+            ok: boolean;
+            citations: Citation[];
+          })
+        : null;
+      exportKnowledgeBaseHtml(repo, {
+        notebook: overviewRes?.overview ?? null,
+        graph,
+        studio: studioRes?.doc ?? null,
+        graphEvidence: evidenceRes?.citations ?? [],
+      });
+    } finally {
+      setExportBusy(null);
+    }
   };
 
   // Shared indexer: sync `files` into `repo` (re-fetching existing docs when this
@@ -229,6 +272,13 @@ export function RepositoriesSection({ onAsk }: { onAsk?: (repo: string, question
                   ✕
                 </button>
               </div>
+              {expanded === r.name && r.kind !== 'memory' && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '4px 0' }}>
+                  <button class="btn btn-small" disabled={exportBusy === r.name} onClick={() => void exportKb(r.name)}>
+                    {exportBusy === r.name ? 'Exporting…' : 'Export Knowledge Base (HTML)'}
+                  </button>
+                </div>
+              )}
               {expanded === r.name && r.kind !== 'memory' && <NotebookPanel repo={r.name} onAsk={onAsk} />}
               {expanded === r.name && r.kind !== 'memory' && <GraphPanel repo={r.name} />}
               {expanded === r.name && r.kind !== 'memory' && <StudioPanel repo={r.name} />}
