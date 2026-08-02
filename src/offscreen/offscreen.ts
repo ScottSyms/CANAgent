@@ -37,7 +37,9 @@ import {
   repoDeleteDoc,
   repoDocs,
   repoExportAll,
+  repoExportOne,
   repoImportAll,
+  repoImportOne,
   repoDocChunks,
   repoGraphGet,
   repoGraphSet,
@@ -401,6 +403,10 @@ async function handleRepo(req: RepoRequest): Promise<RepoResponse> {
         return { ok: true, result: await repoExportAll() };
       case 'import':
         return { ok: true, result: await repoImportAll(req.repos) };
+      case 'exportOne':
+        return { ok: true, result: await repoExportOne(req.repo) };
+      case 'importOne':
+        return { ok: true, result: await repoImportOne(req.repoData, req.targetName) };
       case 'notebookGet':
         return { ok: true, result: await repoNotebookGet(req.repo) };
       case 'notebookSet':

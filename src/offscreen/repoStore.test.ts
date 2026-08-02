@@ -3,8 +3,10 @@ import {
   repoAdd,
   repoDeleteDoc,
   repoDocChunks,
+  repoExportOne,
   repoGraphGet,
   repoGraphSet,
+  repoImportOne,
   repoList,
   repoNotebookGet,
   repoNotebookSample,
@@ -253,5 +255,41 @@ describe('repoList', () => {
     await repoAdd('__memory__', { name: 'Fact', url: 'memory:m1' }, ['fact'], [vec(8, 2)], { embedModel: 'local:minilm', kind: 'memory' });
     const list = await repoList();
     expect(list.map((r) => r.name)).toEqual(['notes']);
+  });
+});
+
+describe('repoExportOne and repoImportOne', () => {
+  it('round-trips a single repository with metadata, chunks, overview, graph, and studio', async () => {
+    await repoAdd('Original Repo', { name: 'doc1.md', url: 'file:///doc1.md' }, ['Content chunk text.'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    
+    const overview: NotebookOverview = {
+      title: 'AI Notebook Title',
+      overviewMarkdown: 'Overview content.',
+      keyTopics: ['topic1'],
+      suggestedQuestions: ['Q1?'],
+      docCount: 1,
+      chunkCount: 1,
+      generatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    await repoNotebookSet('Original Repo', overview);
+
+    const exported = await repoExportOne('Original Repo');
+    expect(exported).not.toBeNull();
+    expect(exported?.name).toBe('Original Repo');
+    expect(exported?.notebook).toEqual(overview);
+
+    // Import under a new target name
+    const impRes = await repoImportOne(exported!, 'Imported Repo');
+    expect(impRes.ok).toBe(true);
+    expect(impRes.name).toBe('Imported Repo');
+
+    // Verify imported notebook overview matches
+    const importedOverview = await repoNotebookGet('Imported Repo');
+    expect(importedOverview).toEqual(overview);
+
+    // Verify search works in imported repo
+    const searchRes = await repoSearch('Imported Repo', vec(8, 1), 5);
+    expect(searchRes.results).toHaveLength(1);
+    expect(searchRes.results[0].text).toBe('Content chunk text.');
   });
 });

@@ -368,7 +368,64 @@ function b64ToU8(b64: string): Uint8Array {
   return u8;
 }
 
-/** Serialize every repository (meta + chunks + base64 vectors) for backup. */
+/** Serialize one repository with all metadata, chunks, vectors, overview, graph, and studio. */
+export async function repoExportOne(repo: string): Promise<ExportedRepo | null> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) return null;
+  const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
+  const vecs = await readVectors(dir);
+  const bytes = new Uint8Array(vecs.buffer, vecs.byteOffset, vecs.byteLength);
+
+  const notebook = await readJson<unknown>(dir, 'notebook.json', null);
+  const graph = await readJson<unknown>(dir, 'graph.json', null);
+  const studio = await readJson<unknown>(dir, 'studio.json', null);
+
+  return {
+    name: repo,
+    meta,
+    chunks,
+    vectorsB64: u8ToB64(bytes),
+    ...(notebook ? { notebook } : {}),
+    ...(graph ? { graph } : {}),
+    ...(studio ? { studio } : {}),
+  };
+}
+
+/** Import one repository archive file into OPFS under targetName || repoData.name. */
+export async function repoImportOne(repoData: ExportedRepo, targetName?: string): Promise<{ ok: boolean; name: string }> {
+  await assertVaultUsable();
+  if (!repoData?.meta || !repoData?.name) return { ok: false, name: '' };
+  const name = (targetName || repoData.name).trim();
+  if (!name) return { ok: false, name: '' };
+
+  const root = await reposDir();
+  try {
+    await root.removeEntry(name, { recursive: true });
+  } catch {
+    // no existing repo by that name
+  }
+
+  const d = await root.getDirectoryHandle(name, { create: true });
+
+  // Update meta.name to match destination name
+  const meta = typeof repoData.meta === 'object' && repoData.meta ? { ...repoData.meta, name } : repoData.meta;
+
+  await writeJson(d, 'meta.json', meta);
+  await writeJson(d, 'chunks.json', Array.isArray(repoData.chunks) ? repoData.chunks : []);
+  await rebuildKeywordIndex(d, Array.isArray(repoData.chunks) ? (repoData.chunks as ChunkRec[]) : []);
+  const u8 = b64ToU8(repoData.vectorsB64 ?? '');
+  await writeVectors(d, new Int8Array(u8.buffer, u8.byteOffset, u8.byteLength));
+
+  if (repoData.notebook) await writeJson(d, 'notebook.json', repoData.notebook);
+  if (repoData.graph) await writeJson(d, 'graph.json', repoData.graph);
+  if (repoData.studio) await writeJson(d, 'studio.json', repoData.studio);
+
+  return { ok: true, name };
+}
+
+/** Serialize every repository (meta + chunks + base64 vectors + artifacts) for backup. */
 export async function repoExportAll(): Promise<ExportedRepo[]> {
   await assertVaultUsable(); // export decrypts chunk text, so needs the vault unlocked
   const out: ExportedRepo[] = [];
@@ -376,13 +433,8 @@ export async function repoExportAll(): Promise<ExportedRepo[]> {
   // @ts-expect-error - entries() exists on FileSystemDirectoryHandle in Chrome
   for await (const [name, handle] of dir.entries()) {
     if (handle.kind !== 'directory') continue;
-    const d = handle as FileSystemDirectoryHandle;
-    const meta = await readJson<RepoMeta | null>(d, 'meta.json', null);
-    if (!meta) continue;
-    const chunks = await readJson<ChunkRec[]>(d, 'chunks.json', []);
-    const vecs = await readVectors(d);
-    const bytes = new Uint8Array(vecs.buffer, vecs.byteOffset, vecs.byteLength);
-    out.push({ name, meta, chunks, vectorsB64: u8ToB64(bytes) });
+    const exp = await repoExportOne(name);
+    if (exp) out.push(exp);
   }
   return out;
 }
@@ -390,22 +442,11 @@ export async function repoExportAll(): Promise<ExportedRepo[]> {
 /** Restore repositories from a backup, overwriting any with the same name. */
 export async function repoImportAll(repos: ExportedRepo[]): Promise<{ imported: number }> {
   await assertVaultUsable(); // import re-encrypts chunk text under the active vault
-  const root = await reposDir();
   let imported = 0;
   for (const r of repos) {
     if (!r?.name) continue;
-    try {
-      await root.removeEntry(r.name, { recursive: true });
-    } catch {
-      // no existing repo by that name
-    }
-    const d = await root.getDirectoryHandle(r.name, { create: true });
-    await writeJson(d, 'meta.json', r.meta);
-    await writeJson(d, 'chunks.json', Array.isArray(r.chunks) ? r.chunks : []);
-    await rebuildKeywordIndex(d, Array.isArray(r.chunks) ? (r.chunks as ChunkRec[]) : []);
-    const u8 = b64ToU8(r.vectorsB64 ?? '');
-    await writeVectors(d, new Int8Array(u8.buffer, u8.byteOffset, u8.byteLength));
-    imported++;
+    const res = await repoImportOne(r);
+    if (res.ok) imported++;
   }
   return { imported };
 }

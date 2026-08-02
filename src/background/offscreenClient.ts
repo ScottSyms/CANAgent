@@ -225,6 +225,14 @@ export function repoImport(repos: ExportedRepo[]): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'import', repos });
 }
 
+export function repoExportOne(repo: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'exportOne', repo });
+}
+
+export function repoImportOne(repoData: ExportedRepo, targetName?: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'importOne', repoData, targetName });
+}
+
 export function notebookGet(repo: string): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'notebookGet', repo });
 }

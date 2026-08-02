@@ -35,7 +35,9 @@ import {
   repoDeleteDoc,
   repoDocs,
   repoExport,
+  repoExportOne,
   repoImport,
+  repoImportOne,
   repoList,
 } from './offscreenClient';
 import { generateNotebookOverview, isOverviewStale } from './notebookOverview';
@@ -516,6 +518,14 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
   }
   if (request.type === 'repo_import') {
     repoImport(request.repos).then((r) => sendResponse(r));
+    return true;
+  }
+  if (request.type === 'repo_export_one') {
+    repoExportOne(request.repo).then((r) => sendResponse(r.ok ? r.result : null));
+    return true;
+  }
+  if (request.type === 'repo_import_one') {
+    repoImportOne(request.repoData, request.targetName).then((r) => sendResponse(r));
     return true;
   }
   if (request.type === 'add_files_to_repo') {

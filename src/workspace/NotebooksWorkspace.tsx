@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'preact/hooks';
-import type { RepoDoc, RepoInfo } from '../shared/messages';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import type { ExportedRepo, RepoDoc, RepoInfo } from '../shared/messages';
+import { downloadBlob } from '../sidebar/conversationExport';
 import {
   filesFromDataTransfer,
   folderRepoName,
@@ -87,6 +88,7 @@ export function NotebooksWorkspace() {
   const [dragOver, setDragOver] = useState(false);
   const [exportBusy, setExportBusy] = useState<string | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
+  const archiveInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -242,6 +244,100 @@ export function NotebooksWorkspace() {
     }
   };
 
+  const saveArchive = async (repoName: string) => {
+    setExportBusy(repoName);
+    try {
+      const expRes = (await chrome.runtime.sendMessage({
+        type: 'repo_export_one',
+        repo: repoName,
+      })) as { ok: boolean; result?: ExportedRepo };
+
+      if (!expRes || !expRes.result) {
+        setBanner(`Could not export archive for "${repoName}".`);
+        return;
+      }
+
+      const archive = {
+        app: 'CANChat Agent',
+        kind: 'knowledge-base-archive',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        repo: expRes.result,
+      };
+
+      const filenameSlug = repoName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'notebook';
+      downloadBlob(
+        JSON.stringify(archive, null, 2),
+        'application/json',
+        `kb-archive-${filenameSlug}.kb.json`,
+      );
+      setBanner(t('notebooks.archiveSaved', { name: repoName }));
+    } catch (e) {
+      setBanner(t('notebooks.archiveError', { msg: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setExportBusy(null);
+    }
+  };
+
+  const triggerArchivePicker = () => {
+    if (archiveInputRef.current) archiveInputRef.current.click();
+  };
+
+  const handleArchiveFile = async (file: File) => {
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      let repoData: ExportedRepo | null = null;
+      if (parsed && typeof parsed === 'object') {
+        if (parsed.kind === 'knowledge-base-archive' && parsed.repo) {
+          repoData = parsed.repo as ExportedRepo;
+        } else if (parsed.name && parsed.meta && parsed.vectorsB64) {
+          repoData = parsed as ExportedRepo;
+        }
+      }
+
+      if (!repoData || !repoData.name) {
+        setBanner(t('notebooks.archiveError', { msg: 'Invalid archive format.' }));
+        return;
+      }
+
+      let targetName = repoData.name;
+      if (repos.some((r) => r.name === targetName)) {
+        const answer = prompt(
+          `A notebook named "${targetName}" already exists. Enter a name to save it as:`,
+          `${targetName} (Imported)`,
+        );
+        if (!answer) return; // User cancelled
+        targetName = answer.trim();
+      }
+
+      const res = (await chrome.runtime.sendMessage({
+        type: 'repo_import_one',
+        repoData,
+        targetName,
+      })) as { ok: boolean; name: string };
+
+      if (res?.ok) {
+        setBanner(t('notebooks.archiveLoaded', { name: res.name || targetName }));
+        await load();
+        setSelectedRepoName(res.name || targetName);
+        setActiveTab('notebooks');
+      } else {
+        setBanner(t('notebooks.archiveError', { msg: 'Failed to import repository.' }));
+      }
+    } catch (e) {
+      setBanner(t('notebooks.archiveError', { msg: e instanceof Error ? e.message : String(e) }));
+    }
+  };
+
+  const handleArchiveSelect = (e: Event) => {
+    const input = e.target as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+      void handleArchiveFile(input.files[0]);
+    }
+    input.value = '';
+  };
+
   const filteredRepos = repos.filter((r) =>
     r.name.toLowerCase().includes(searchQuery.trim().toLowerCase()),
   );
@@ -258,6 +354,13 @@ export function NotebooksWorkspace() {
 
   return (
     <div class="ws-notebooks-page">
+      <input
+        type="file"
+        ref={archiveInputRef}
+        accept=".kb.json,.json"
+        style={{ display: 'none' }}
+        onChange={handleArchiveSelect}
+      />
       <header class="ws-notebooks-header">
         <h2>{t('repos.title')}</h2>
         <p class="settings-note">{t('repos.note')}</p>
@@ -316,6 +419,16 @@ export function NotebooksWorkspace() {
             <p class="settings-note">Connect via Microsoft Graph to index email correspondence.</p>
             <MailboxSection onChanged={() => void load()} />
           </div>
+
+          <div class="ws-indexing-card">
+            <h3>📥 Knowledge Base Archive</h3>
+            <p class="settings-note">Restore or import a shared .kb.json notebook archive file.</p>
+            <div class="repo-folder-row" style={{ marginTop: '8px' }}>
+              <button class="btn btn-primary" onClick={triggerArchivePicker}>
+                Choose .kb.json Archive…
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -337,6 +450,13 @@ export function NotebooksWorkspace() {
                 onClick={() => setActiveTab('indexing')}
               >
                 + Add
+              </button>
+              <button
+                class="btn btn-small"
+                title="Reload/Import a .kb.json notebook archive"
+                onClick={triggerArchivePicker}
+              >
+                📥 Reload
               </button>
             </div>
 
@@ -401,13 +521,22 @@ export function NotebooksWorkspace() {
 
                   <div class="ws-notebook-actions">
                     {selectedRepo.kind !== 'memory' && (
-                      <button
-                        class="btn btn-small"
-                        disabled={exportBusy === selectedRepo.name}
-                        onClick={() => void exportKb(selectedRepo.name)}
-                      >
-                        {exportBusy === selectedRepo.name ? 'Exporting…' : 'Export Knowledge Base (HTML)'}
-                      </button>
+                      <>
+                        <button
+                          class="btn btn-small"
+                          disabled={exportBusy === selectedRepo.name}
+                          onClick={() => void saveArchive(selectedRepo.name)}
+                        >
+                          💾 Save Archive (.kb.json)
+                        </button>
+                        <button
+                          class="btn btn-small"
+                          disabled={exportBusy === selectedRepo.name}
+                          onClick={() => void exportKb(selectedRepo.name)}
+                        >
+                          {exportBusy === selectedRepo.name ? 'Exporting…' : 'Export Knowledge Base (HTML)'}
+                        </button>
+                      </>
                     )}
                     <button
                       class="btn btn-small btn-danger"

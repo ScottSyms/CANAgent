@@ -127,6 +127,8 @@ export type RuntimeRequest =
   | { type: 'repo_doc_delete'; repo: string; docId: string }
   | { type: 'repo_export' }
   | { type: 'repo_import'; repos: ExportedRepo[] }
+  | { type: 'repo_export_one'; repo: string }
+  | { type: 'repo_import_one'; repoData: ExportedRepo; targetName?: string }
   | { type: 'add_files_to_repo'; repo: string; files: UploadFile[]; kind?: RepoKind }
   // Notebook overview (NotebookLM-style): read the cached overview (+ staleness),
   // or (re)generate and persist it from the repo's documents.
@@ -372,12 +374,15 @@ export interface GeneratePresentationRequest {
 }
 
 /** Requests to the offscreen document's OPFS RAG store. */
-/** A single repository serialized for backup (vectors base64-encoded). */
+/** A single repository serialized for backup or single-repo export (vectors base64-encoded). */
 export interface ExportedRepo {
   name: string;
   meta: unknown;
   chunks: unknown;
   vectorsB64: string;
+  notebook?: unknown;
+  graph?: unknown;
+  studio?: unknown;
 }
 
 export type RepoRequest =
@@ -415,6 +420,8 @@ export type RepoRequest =
   | { target: 'offscreen-repo'; op: 'deleteDoc'; repo: string; docId: string }
   | { target: 'offscreen-repo'; op: 'export' }
   | { target: 'offscreen-repo'; op: 'import'; repos: ExportedRepo[] }
+  | { target: 'offscreen-repo'; op: 'exportOne'; repo: string }
+  | { target: 'offscreen-repo'; op: 'importOne'; repoData: ExportedRepo; targetName?: string }
   // Notebook overview (NotebookLM-style): cached per-repo synthesized view, plus a
   // strided chunk sample the background generator synthesizes it from.
   | { target: 'offscreen-repo'; op: 'notebookGet'; repo: string }
