@@ -18,6 +18,7 @@ interface BuildResponse {
   ok: boolean;
   error?: string;
   graph?: DocGraph;
+  warnings?: string[];
 }
 interface EvidenceResponse {
   ok: boolean;
@@ -71,6 +72,7 @@ export function GraphPanel({ repo }: { repo: string }) {
   const [docCount, setDocCount] = useState(0);
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<{ title: string; summary: string; color?: string } | null>(null);
   const [evidence, setEvidence] = useState<Citation[]>([]);
@@ -99,12 +101,14 @@ export function GraphPanel({ repo }: { repo: string }) {
 
   const build = async (rebuild: boolean) => {
     setError(null);
+    setWarnings([]);
     setBuilding(true);
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(() => void refresh(), 2000) as unknown as number;
     try {
       const res = (await chrome.runtime.sendMessage({ type: 'notebook_graph_build', repo, rebuild })) as BuildResponse;
       if (res?.ok && res.graph) setGraph(res.graph);
+      if (res?.ok) setWarnings(res.warnings ?? []);
       else if (res && !res.ok) setError(res.error ?? 'Graph build failed.');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -138,6 +142,8 @@ export function GraphPanel({ repo }: { repo: string }) {
 
   const border = '1px solid var(--border)';
   const processed = graph?.processedDocIds.length ?? 0;
+  const failedIds = graph?.failedDocIds ?? [];
+  const docErrors = graph?.docErrors ?? {};
   const nodeCount = graph?.nodes.length ?? 0;
   const edgeCount = graph?.edges.length ?? 0;
   const communities = graph?.communities ?? [];
@@ -156,7 +162,7 @@ export function GraphPanel({ repo }: { repo: string }) {
           <button class="btn btn-small" disabled={building} onClick={() => void build(false)}>
             {building ? 'Building…' : nodeCount > 0 ? 'Update' : 'Build graph'}
           </button>
-          {nodeCount > 0 && !building && (
+          {(nodeCount > 0 || failedIds.length > 0) && !building && (
             <button class="btn btn-small" onClick={() => void build(true)} title="Discard and re-extract from scratch">
               Rebuild
             </button>
@@ -166,17 +172,42 @@ export function GraphPanel({ repo }: { repo: string }) {
 
       {error && <p class="settings-note" style={{ color: 'var(--error)' }}>{error}</p>}
 
+      {!building && warnings.map((w, i) => (
+        <p key={i} class="settings-note" style={{ color: 'var(--warn)' }}>{w}</p>
+      ))}
+
       {building && (
         <p class="settings-note">
           Extracting… {processed} / {docCount} documents · {nodeCount} entities, {edgeCount} relationships
         </p>
       )}
 
-      {!building && nodeCount === 0 && (
+      {!building && nodeCount === 0 && failedIds.length === 0 && (
         <p class="settings-note">
           No graph yet — build one to extract entities, relationships, and themes from this notebook's documents, each
           grounded to its source sentences.
         </p>
+      )}
+
+      {!building && nodeCount === 0 && failedIds.length > 0 && (
+        <p class="settings-note">
+          Extraction failed for every document — click "Build graph" above to retry, or see details below.
+        </p>
+      )}
+
+      {!building && failedIds.length > 0 && (
+        <details style={{ marginTop: '6px' }}>
+          <summary class="settings-note" style={{ cursor: 'pointer' }}>
+            {failedIds.length} document(s) failed extraction — details
+          </summary>
+          <ul style={{ margin: '4px 0 0', paddingLeft: '18px' }}>
+            {failedIds.map((id) => (
+              <li key={id} class="settings-note" style={{ fontSize: '12px' }}>
+                {id}: {docErrors[id] ?? 'unknown error'}
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
 
       {view && nodeCount > 0 && (

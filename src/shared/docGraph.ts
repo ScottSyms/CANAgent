@@ -54,6 +54,15 @@ export interface DocGraph {
   embedModel?: string;
   /** Doc ids already folded in — lets extraction resume without reprocessing. */
   processedDocIds: string[];
+  /**
+   * Doc ids whose most recent extraction attempt produced nothing (every window
+   * failed) — deliberately kept OUT of processedDocIds so a normal (non-rebuild)
+   * build retries them, instead of silently and permanently treating a failed
+   * document as done.
+   */
+  failedDocIds?: string[];
+  /** Human-readable failure reason per doc id in failedDocIds. */
+  docErrors?: Record<string, string>;
   /** Corpus-level topic communities + summaries (computed after extraction). */
   communities?: CommunitySummary[];
   updatedAt: string;
@@ -66,6 +75,28 @@ const MAX_EVIDENCE_PER_ITEM = 12;
 
 export function emptyDocGraph(): DocGraph {
   return { nodes: [], edges: [], version: DOC_GRAPH_VERSION, processedDocIds: [], updatedAt: new Date(0).toISOString() };
+}
+
+/**
+ * Record a document as processed (its extraction produced at least something
+ * usable, or ran with no error). Dedupes, and clears any prior failure entry —
+ * a doc that later succeeds is no longer "failed".
+ */
+export function markDocProcessed(graph: DocGraph, docId: string): void {
+  if (!graph.processedDocIds.includes(docId)) graph.processedDocIds.push(docId);
+  if (graph.failedDocIds) graph.failedDocIds = graph.failedDocIds.filter((id) => id !== docId);
+  if (graph.docErrors) delete graph.docErrors[docId];
+}
+
+/**
+ * Record a document as failed (every extraction attempt produced nothing). Left
+ * OUT of processedDocIds so it is retried on the next non-rebuild build. Dedupes.
+ */
+export function markDocFailed(graph: DocGraph, docId: string, reason: string): void {
+  if (!graph.failedDocIds) graph.failedDocIds = [];
+  if (!graph.failedDocIds.includes(docId)) graph.failedDocIds.push(docId);
+  if (!graph.docErrors) graph.docErrors = {};
+  graph.docErrors[docId] = reason;
 }
 
 /** Normalize an entity name for identity (case/whitespace-insensitive). */

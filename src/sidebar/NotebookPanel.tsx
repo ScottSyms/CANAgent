@@ -105,8 +105,11 @@ export function NotebookPanel({ repo, onAsk }: { repo: string; onAsk?: (repo: st
                     fontWeight: 600,
                     padding: '2px 8px',
                     borderRadius: '10px',
-                    background: 'var(--accent-dim)',
-                    color: 'var(--accent)',
+                    // Filled accent pill with background-colored text, so it stays
+                    // legible (--accent-dim is a *darker* accent shade, not a light
+                    // tint — accent-on-dim washes out).
+                    background: 'var(--accent)',
+                    color: 'var(--bg)',
                   }}
                 >
                   {topic}

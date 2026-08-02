@@ -88,8 +88,10 @@ export function StudioPanel({ repo }: { repo: string }) {
               borderRadius: '6px',
               border,
               cursor: 'pointer',
-              background: active === kind ? 'var(--accent-dim)' : 'var(--bg-card)',
-              color: active === kind ? 'var(--accent)' : 'var(--text)',
+              // Filled accent pill when active (accent-dim is a darker accent
+              // shade, not a light tint — accent-on-dim washes out the text).
+              background: active === kind ? 'var(--accent)' : 'var(--bg-card)',
+              color: active === kind ? 'var(--bg)' : 'var(--text)',
               fontWeight: active === kind ? 700 : 400,
             }}
           >

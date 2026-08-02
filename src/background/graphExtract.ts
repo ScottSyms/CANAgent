@@ -13,11 +13,26 @@ import type { Settings } from '../shared/types';
 import type { LlmMessage } from './llmProvider';
 import { complete, resolveModelForRole } from './llmProvider';
 import { extractJsonObject } from './scopedSubtask';
-import { coerceExtraction, emptyDocGraph, mergeExtraction, type CommunitySummary, type DocExtraction, type DocGraph } from '../shared/docGraph';
+import {
+  coerceExtraction,
+  emptyDocGraph,
+  markDocFailed,
+  markDocProcessed,
+  mergeExtraction,
+  type CommunitySummary,
+  type DocExtraction,
+  type DocGraph,
+} from '../shared/docGraph';
 import { detectCommunities, renderCommunityForModel } from '../shared/graphCommunities';
 import { docChunks, graphGet, graphSet, repoDocs } from './offscreenClient';
 
 const PER_DOC_BUDGET_CHARS = 12000;
+// Cap on how many budget-sized windows one document is split into, so a
+// pathologically large doc (hundreds of pages) can't blow up build cost/latency.
+// At the default budget this covers roughly the first ~20-25 pages of a typical
+// PDF — an improvement over the prior single-window (~2-3 page) coverage, not a
+// promise of full-document coverage for very large corpora.
+const MAX_WINDOWS_PER_DOC = 6;
 
 const SYSTEM_PROMPT =
   'You extract a knowledge graph from ONE document. The document is given as a list of sentences, each prefixed ' +
@@ -31,50 +46,130 @@ const SYSTEM_PROMPT =
   'Only cite ids that appear in the text; do not invent ids or facts.';
 
 /**
- * Render a document's chunks as sentence-tagged lines (`[[id]] sentence`) within a
- * char budget, returning the text plus the set of ids that actually appear — the
- * allow-list the extraction is validated against (fabricated ids are rejected).
+ * Split a document's chunks into budget-sized, sentence-tagged windows
+ * (`[[id]] sentence` lines), covering the WHOLE document (up to `maxWindows`)
+ * rather than only its first budget's worth — a large document is extracted
+ * across multiple model calls instead of silently dropping everything past the
+ * first window. Each returned window carries the set of sentence ids it
+ * contains — the allow-list that window's extraction is validated against
+ * (fabricated ids are rejected). Always returns at least one (possibly empty)
+ * window, so callers don't need to special-case an empty document.
  */
-export function tagDocChunks(
+export function windowDocChunks(
   chunks: Array<{ text: string; sentences: CitableSentence[] }>,
   budget = PER_DOC_BUDGET_CHARS,
-): { text: string; validIds: Set<string> } {
-  const validIds = new Set<string>();
-  const lines: string[] = [];
+  maxWindows = MAX_WINDOWS_PER_DOC,
+): Array<{ text: string; validIds: Set<string> }> {
+  const windows: Array<{ text: string; validIds: Set<string> }> = [];
+  let lines: string[] = [];
+  let validIds = new Set<string>();
   let used = 0;
-  for (const c of chunks) {
+  const flush = () => {
+    if (lines.length === 0) return;
+    windows.push({ text: lines.join('\n'), validIds });
+    lines = [];
+    validIds = new Set();
+    used = 0;
+  };
+
+  outer: for (const c of chunks) {
     for (const s of c.sentences) {
       const sentence = c.text.slice(s.start, s.end).trim();
       if (!sentence) continue;
       const line = `[[${s.id}]] ${sentence}`;
-      if (used + line.length > budget) return { text: lines.join('\n'), validIds };
+      if (used + line.length > budget) {
+        flush();
+        if (windows.length >= maxWindows) break outer;
+      }
       used += line.length;
       validIds.add(s.id);
       lines.push(line);
     }
   }
-  return { text: lines.join('\n'), validIds };
+  flush();
+  return windows.length > 0 ? windows : [{ text: '', validIds: new Set() }];
 }
 
-/** Extract one document's entities/relations from its sentence-tagged text. */
+/**
+ * Single-window convenience wrapper over `windowDocChunks` — the first window
+ * only (matches the original single-window extraction shape for call sites that
+ * intentionally only want a document's opening portion).
+ */
+export function tagDocChunks(
+  chunks: Array<{ text: string; sentences: CitableSentence[] }>,
+  budget = PER_DOC_BUDGET_CHARS,
+): { text: string; validIds: Set<string> } {
+  return windowDocChunks(chunks, budget, 1)[0];
+}
+
+export type ExtractOutcome =
+  | { ok: true; extraction: DocExtraction }
+  | { ok: false; reason: 'truncated' | 'parse_error' | 'empty' };
+
+/**
+ * Heuristic: does `content` look like it was cut off mid-JSON (unbalanced
+ * braces/brackets outside of string literals)? There's no `finish_reason`
+ * exposed by this provider's reply shape, so this is the signal available —
+ * good enough to distinguish "the model ran out of tokens" from "the model
+ * returned genuinely malformed JSON" for reporting purposes.
+ */
+export function looksTruncated(content: string): boolean {
+  if (!content.trim()) return false;
+  let braces = 0;
+  let brackets = 0;
+  let inString = false;
+  let escaped = false;
+  for (const ch of content) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      if (inString) escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '{') braces++;
+    else if (ch === '}') braces--;
+    else if (ch === '[') brackets++;
+    else if (ch === ']') brackets--;
+  }
+  return braces !== 0 || brackets !== 0;
+}
+
+/**
+ * Extract one document window's entities/relations from its sentence-tagged
+ * text. Unlike the original version, failures are reported (truncated model
+ * output, unparseable JSON, or a genuinely empty extraction) rather than
+ * silently collapsed into an empty result — callers decide how to treat each.
+ */
 export async function extractOneDoc(
   settings: Settings,
   taggedText: string,
   validIds: Set<string>,
   signal?: AbortSignal,
-): Promise<DocExtraction> {
+): Promise<ExtractOutcome> {
   const messages: LlmMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: taggedText },
   ];
   const reply = await complete(resolveModelForRole(settings, 'utility'), messages, undefined, signal);
+  const content = reply.content ?? '';
   let obj: unknown;
   try {
-    obj = extractJsonObject(reply.content ?? '');
+    obj = extractJsonObject(content);
   } catch {
-    return { entities: [], relations: [] };
+    return { ok: false, reason: looksTruncated(content) ? 'truncated' : 'parse_error' };
   }
-  return coerceExtraction(obj, validIds);
+  const extraction = coerceExtraction(obj, validIds);
+  if (extraction.entities.length === 0 && extraction.relations.length === 0) {
+    return { ok: false, reason: 'empty' };
+  }
+  return { ok: true, extraction };
 }
 
 const MAX_COMMUNITIES = 12;
@@ -144,14 +239,24 @@ export interface GraphBuildResult {
   ok: boolean;
   graph?: DocGraph;
   error?: string;
+  /** Non-fatal issues (e.g. documents that failed extraction) — the build still succeeded overall. */
+  warnings?: string[];
 }
+
+const REASON_LABEL: Record<'truncated' | 'parse_error' | 'empty', string> = {
+  truncated: 'the model\'s output was truncated (try a smaller/simpler document, or increase max tokens)',
+  parse_error: 'the model did not return valid JSON',
+  empty: 'the model found nothing to extract',
+};
 
 /**
  * Build (or resume/rebuild) the knowledge graph for a repository. Iterates the
- * documents not yet in `processedDocIds`, extracts each, merges into the graph,
- * and checkpoints after every document. A failed document is still marked
- * processed (a full rebuild re-attempts it) so a persistently-failing doc can't
- * stall the build.
+ * documents not yet in `processedDocIds` (which now excludes docs whose last
+ * attempt failed entirely — see `failedDocIds`), extracts each across multiple
+ * windows when large, merges successes into the graph, and checkpoints after
+ * every document. A document where every window fails is recorded in
+ * `failedDocIds` (NOT `processedDocIds`) with a reason, so a plain rebuild-free
+ * "Build"/"Update" naturally retries it next time instead of getting stuck.
  */
 export async function buildRepoGraph(
   settings: Settings,
@@ -183,27 +288,42 @@ export async function buildRepoGraph(
   for (const doc of todo) {
     if (opts.signal?.aborted) break;
     report(doc.name);
+    let anySuccess = false;
+    let lastFailureReason = '';
     try {
       const chunksRes = await docChunks(repo, doc.id);
       const chunks = (chunksRes.ok ? chunksRes.result : []) as Array<{ text: string; sentences: CitableSentence[] }>;
-      const { text, validIds } = tagDocChunks(chunks);
-      if (validIds.size > 0) {
-        const extraction = await extractOneDoc(settings, text, validIds, opts.signal);
-        mergeExtraction(graph, extraction, doc.id);
+      const windows = windowDocChunks(chunks);
+      for (const { text, validIds } of windows) {
+        if (validIds.size === 0) continue;
+        const outcome = await extractOneDoc(settings, text, validIds, opts.signal);
+        if (outcome.ok) {
+          mergeExtraction(graph, outcome.extraction, doc.id);
+          anySuccess = true;
+        } else {
+          lastFailureReason = REASON_LABEL[outcome.reason];
+        }
       }
-    } catch {
-      // Extraction/model failure — fall through and still mark the doc processed.
+    } catch (e) {
+      lastFailureReason = e instanceof Error ? e.message : 'extraction failed';
     }
-    if (!graph.processedDocIds.includes(doc.id)) graph.processedDocIds.push(doc.id);
+    if (anySuccess) {
+      // Partial coverage (some windows succeeded) still counts as processed —
+      // better than none, and avoids re-doing the successful windows on retry.
+      markDocProcessed(graph, doc.id);
+    } else {
+      markDocFailed(graph, doc.id, lastFailureReason || 'no content could be extracted');
+    }
     const setRes = await graphSet(repo, graph); // checkpoint after every doc
     if (!setRes.ok) return { ok: false, error: setRes.error };
   }
 
-  // Once every document is folded in, cluster the graph into themes (global
-  // sensemaking). Re-summarize when new docs were processed, on an explicit
-  // rebuild, or when no themes exist yet.
-  const allProcessed = graph.processedDocIds.length >= docs.length;
-  const shouldSummarize = allProcessed && !opts.signal?.aborted && (opts.rebuild || !graph.communities || todo.length > 0);
+  // Once every document has been attempted (success or failure), cluster the
+  // graph into themes (global sensemaking). Re-summarize when new docs were
+  // processed, on an explicit rebuild, or when no themes exist yet.
+  const attempted = graph.processedDocIds.length + (graph.failedDocIds?.length ?? 0);
+  const allAttempted = attempted >= docs.length;
+  const shouldSummarize = allAttempted && !opts.signal?.aborted && (opts.rebuild || !graph.communities || todo.length > 0);
   if (shouldSummarize && graph.nodes.length > 0) {
     graph.communities = await summarizeCommunities(settings, graph, opts.signal);
     const setRes = await graphSet(repo, graph);
@@ -211,5 +331,13 @@ export async function buildRepoGraph(
   }
 
   report();
-  return { ok: true, graph };
+  const warnings =
+    graph.failedDocIds && graph.failedDocIds.length > 0
+      ? [
+          `${graph.failedDocIds.length} document(s) could not be extracted: ${graph.failedDocIds
+            .map((id) => docs.find((d) => d.id === id)?.name ?? id)
+            .join(', ')}.`,
+        ]
+      : undefined;
+  return { ok: true, graph, warnings };
 }
