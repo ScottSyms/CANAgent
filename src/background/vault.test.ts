@@ -42,6 +42,13 @@ describe('vault lifecycle', () => {
     expect(await vaultDecrypt('sk-123')).toBe('sk-123');
   });
 
+  it('reports "none" (no throw) when chrome.storage is unavailable in this context', async () => {
+    // e.g. the offscreen document on some Chrome builds — readVault must not
+    // throw `reading 'local'`, which would abort every repoAdd via assertVaultUsable.
+    vi.stubGlobal('chrome', {});
+    expect(await getVaultState()).toBe('none');
+  });
+
   it('setup unlocks and enables encryption; values round-trip', async () => {
     await setupVault('correct horse battery staple');
     expect(await getVaultState()).toBe('unlocked');

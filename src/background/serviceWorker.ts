@@ -24,6 +24,8 @@ import { AgentRuntime } from './agentRuntime';
 import { recordLearnEvent, startLearnRecording, stopLearnRecording } from './learning';
 import { LlmError, testConnection, transcribe } from './llmProvider';
 import {
+  graphGet,
+  notebookGet,
   productDelete,
   productExport,
   productGet,
@@ -36,6 +38,17 @@ import {
   repoImport,
   repoList,
 } from './offscreenClient';
+import { generateNotebookOverview, isOverviewStale } from './notebookOverview';
+import { buildRepoGraph } from './graphExtract';
+import { generateStudioOutput } from './studioOutputs';
+import { studioGet } from './offscreenClient';
+import { resolveSentenceCitations } from './sentenceResolve';
+import type { NotebookOverview } from '../shared/types';
+import type { DocGraph } from '../shared/docGraph';
+
+// Repos with a graph build currently in flight (in-memory; lost on SW eviction,
+// after which a build resumes from the checkpointed graph on the next request).
+const graphBuilding = new Set<string>();
 import { ingestFile } from './repoIngest';
 import { indexMailbox, type MailSyncProgress } from './mailIngest';
 import {
@@ -76,6 +89,7 @@ import {
 import { probeEnvironment } from './envProbe';
 import { applyDecay, MEMORY_NODE_CAP, pruneGraph } from '../shared/memoryGraph';
 import { memoryIndexRemove, memoryIndexUpsert } from './memoryIndex';
+import { getVaultState, vaultDecrypt, vaultEncrypt } from './vault';
 
 // ----- Mailbox auto-refresh (chrome.alarms, opt-in) -----
 //
@@ -384,6 +398,22 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     repoList().then((r) => sendResponse(r.ok ? r.result : []));
     return true;
   }
+  if (request.type === 'vault_op') {
+    // The offscreen repo store delegates vault crypto here (it may lack storage).
+    (async () => {
+      switch (request.op) {
+        case 'state':
+          return { state: await getVaultState() };
+        case 'encrypt':
+          return { value: await vaultEncrypt(request.value ?? '') };
+        case 'decrypt':
+          return { value: await vaultDecrypt(request.value ?? '') };
+      }
+    })()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ error: String(e) }));
+    return true;
+  }
   if (request.type === 'job_control') {
     const { action, id } = request;
     const op =
@@ -400,6 +430,80 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
   }
   if (request.type === 'repo_docs') {
     repoDocs(request.repo).then((r) => sendResponse(r.ok ? r.result : []));
+    return true;
+  }
+  if (request.type === 'notebook_overview_get') {
+    (async () => {
+      const [nbRes, docsRes] = await Promise.all([notebookGet(request.repo), repoDocs(request.repo)]);
+      const overview = (nbRes.ok ? nbRes.result : null) as NotebookOverview | null;
+      const docs = (docsRes.ok ? docsRes.result : []) as Array<{ chunkCount: number }>;
+      const docCount = docs.length;
+      const chunkCount = docs.reduce((n, d) => n + (d.chunkCount ?? 0), 0);
+      return { ok: true, overview, stale: isOverviewStale(overview, docCount, chunkCount), docCount, chunkCount };
+    })()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (request.type === 'notebook_overview_generate') {
+    (async () => {
+      const settings = await getSettings();
+      if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
+      return generateNotebookOverview(settings, request.repo);
+    })()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (request.type === 'notebook_graph_get') {
+    (async () => {
+      const [graphRes, docsRes] = await Promise.all([graphGet(request.repo), repoDocs(request.repo)]);
+      const graph = (graphRes.ok ? graphRes.result : null) as DocGraph | null;
+      const docs = (docsRes.ok ? docsRes.result : []) as unknown[];
+      return { ok: true, graph, docCount: docs.length, building: graphBuilding.has(request.repo) };
+    })()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (request.type === 'notebook_graph_build') {
+    // Kept-open channel keeps the SW alive during the build; the UI polls
+    // notebook_graph_get meanwhile for per-doc progress (checkpointed each doc).
+    (async () => {
+      const settings = await getSettings();
+      if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
+      if (graphBuilding.has(request.repo)) return { ok: false, error: 'A graph build is already running for this notebook.' };
+      graphBuilding.add(request.repo);
+      try {
+        return await buildRepoGraph(settings, request.repo, { rebuild: request.rebuild });
+      } finally {
+        graphBuilding.delete(request.repo);
+      }
+    })()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (request.type === 'notebook_graph_evidence') {
+    resolveSentenceCitations(request.repo, request.sentenceIds)
+      .then((citations) => sendResponse({ ok: true, citations }))
+      .catch((e) => sendResponse({ ok: false, error: String(e), citations: [] }));
+    return true;
+  }
+  if (request.type === 'notebook_studio_get') {
+    studioGet(request.repo)
+      .then((r) => sendResponse({ ok: true, doc: r.ok ? r.result : { outputs: {} } }))
+      .catch((e) => sendResponse({ ok: false, error: String(e), doc: { outputs: {} } }));
+    return true;
+  }
+  if (request.type === 'notebook_studio_generate') {
+    (async () => {
+      const settings = await getSettings();
+      if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
+      return generateStudioOutput(settings, request.repo, request.kind);
+    })()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }
   if (request.type === 'repo_doc_delete') {

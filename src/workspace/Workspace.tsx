@@ -100,7 +100,14 @@ export function Workspace() {
       case 'projects':
         return <ProjectsPage />;
       case 'knowledge':
-        return <RepositoriesSection />;
+        return (
+          <RepositoriesSection
+            onAsk={(repo, question) => {
+              setInput(`Using the "${repo}" knowledge base: ${question}`);
+              setView('chat');
+            }}
+          />
+        );
       case 'tools':
         return <CapabilitiesSection defaultOpen />;
       case 'skills':

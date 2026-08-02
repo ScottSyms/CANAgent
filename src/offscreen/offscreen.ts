@@ -38,8 +38,16 @@ import {
   repoDocs,
   repoExportAll,
   repoImportAll,
+  repoDocChunks,
+  repoGraphGet,
+  repoGraphSet,
   repoList,
+  repoNotebookGet,
+  repoNotebookSample,
+  repoNotebookSet,
   repoSearch,
+  repoStudioGet,
+  repoStudioSet,
 } from './repoStore';
 import { productDelete, productExportAll, productGet, productImportAll, productList, productSave } from './productStore';
 
@@ -393,6 +401,25 @@ async function handleRepo(req: RepoRequest): Promise<RepoResponse> {
         return { ok: true, result: await repoExportAll() };
       case 'import':
         return { ok: true, result: await repoImportAll(req.repos) };
+      case 'notebookGet':
+        return { ok: true, result: await repoNotebookGet(req.repo) };
+      case 'notebookSet':
+        await repoNotebookSet(req.repo, req.overview);
+        return { ok: true };
+      case 'notebookSample':
+        return { ok: true, result: await repoNotebookSample(req.repo, req.maxChunks) };
+      case 'graphGet':
+        return { ok: true, result: await repoGraphGet(req.repo) };
+      case 'graphSet':
+        await repoGraphSet(req.repo, req.graph);
+        return { ok: true };
+      case 'docChunks':
+        return { ok: true, result: await repoDocChunks(req.repo, req.docId) };
+      case 'studioGet':
+        return { ok: true, result: await repoStudioGet(req.repo) };
+      case 'studioSet':
+        await repoStudioSet(req.repo, req.doc);
+        return { ok: true };
     }
   } catch (e) {
     return { ok: false, error: String(e) };

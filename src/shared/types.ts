@@ -392,6 +392,30 @@ export interface DataExport {
   rows: string[][];
 }
 
+/**
+ * A validated sentence-level citation attached to an assistant answer. Fully
+ * resolved at answer time (chunk text + offsets included) so the UI can display
+ * and highlight the exact supporting sentence deterministically — no second
+ * search, embedding, or LLM call, and no fuzzy string matching (spec §6/§7).
+ */
+export interface Citation {
+  /** Stable sentence id the model cited, e.g. `doc-73:c42:s3#8f31ca`. */
+  sentenceId: string;
+  /** Source document/page display name. */
+  docName: string;
+  /** Source URL (opened in a tab; `#page=N` appended when `page` is known). */
+  url: string;
+  /** 1-based page number, when the source format exposed one. */
+  page?: number;
+  /** The exact cited sentence (`chunkText.slice(start, end)`). */
+  sentenceText: string;
+  /** The full chunk the sentence lives in, for surrounding context + highlight. */
+  chunkText: string;
+  /** Offsets of the sentence within `chunkText`. */
+  start: number;
+  end: number;
+}
+
 export interface ChatMessageView {
   role: 'user' | 'assistant' | 'notice';
   text: string;
@@ -402,6 +426,46 @@ export interface ChatMessageView {
   dataExport?: DataExport;
   /** A downloadable binary file (e.g. a generated .docx) attached to this message. */
   fileArtifact?: FileArtifact;
+  /** Sentence-level citations the assistant referenced via [[id]] tokens in `text`. */
+  citations?: Citation[];
+}
+
+/**
+ * A synthesized "notebook" view of one repository (NotebookLM-style): an overview
+ * of the corpus, its key topics, and starter questions. Derived from the repo's
+ * documents and cached per repo; `docCount`/`chunkCount` snapshot what it was
+ * generated from so the UI can detect when it is stale.
+ */
+export interface NotebookOverview {
+  overviewMarkdown: string;
+  keyTopics: string[];
+  suggestedQuestions: string[];
+  docCount: number;
+  chunkCount: number;
+  /** ISO timestamp of generation. */
+  generatedAt: string;
+}
+
+/** A notebook "studio" output kind (NotebookLM-style). */
+export type StudioKind = 'briefing' | 'faq' | 'study_guide';
+
+/**
+ * A generated "studio" output for a notebook: grounded Markdown synthesized from
+ * the repository's knowledge graph, with sentence-level citations resolved for
+ * click-through (same substrate as chat answers).
+ */
+export interface StudioOutput {
+  kind: StudioKind;
+  title: string;
+  /** Markdown body with inline [[sentence-id]] citation tokens. */
+  markdown: string;
+  citations: Citation[];
+  generatedAt: string;
+}
+
+/** All studio outputs generated for one notebook (persisted per repo). */
+export interface StudioDoc {
+  outputs: Partial<Record<StudioKind, StudioOutput>>;
 }
 
 /** A generated binary document offered to the user as a download. */

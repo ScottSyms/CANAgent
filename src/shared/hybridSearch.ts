@@ -9,7 +9,7 @@
 // sum over each list it appears in of 1/(rrfK + rank).
 
 import { bm25Rank, bm25RankIndexed, type KeywordIndex } from './keywordSearch';
-import { scoreVectors, type SearchHit, type SearchParams } from './vectorSearch';
+import { chunkToHit, scoreVectors, type SearchHit, type SearchParams } from './vectorSearch';
 
 export interface RankedItem {
   i: number;
@@ -87,7 +87,7 @@ export function hybridSearch(params: HybridParams): SearchHit[] {
   return fuseRRF({ lists, k, rrfK: params.rrfK, pool: params.pool })
     .map(({ i, score }) => {
       const c = chunks[i];
-      return c ? { text: c.text, name: c.name, url: c.url, score } : null;
+      return c ? chunkToHit(c, score) : null;
     })
     .filter((r): r is SearchHit => r !== null);
 }
@@ -107,7 +107,7 @@ export function multiHybridSearch(params: MultiHybridParams): SearchHit[] {
   return fuseRRF({ lists, k, rrfK: params.rrfK, pool: params.pool })
     .map(({ i, score }) => {
       const c = chunks[i];
-      return c ? { text: c.text, name: c.name, url: c.url, score } : null;
+      return c ? chunkToHit(c, score) : null;
     })
     .filter((r): r is SearchHit => r !== null);
 }

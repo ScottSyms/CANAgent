@@ -44,6 +44,13 @@ interface VaultRecord {
 export type VaultState = 'none' | 'locked' | 'unlocked';
 
 async function readVault(): Promise<VaultRecord | null> {
+  // chrome.storage can be absent in some contexts the store runs in (notably the
+  // offscreen document on certain Chrome builds). Mirror readSessionDekRaw's
+  // tolerance: with no storage API there is no readable vault record, so report
+  // "no vault" instead of throwing a cryptic `reading 'local'` TypeError that
+  // would abort every repoAdd/repoSearch through assertVaultUsable. When the API
+  // *is* present, behaviour is unchanged and the vault stays fully enforced.
+  if (!chrome?.storage?.local) return null;
   const r = await chrome.storage.local.get(VAULT_KEY);
   return (r[VAULT_KEY] as VaultRecord | undefined) ?? null;
 }

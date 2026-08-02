@@ -25,6 +25,8 @@ import type {
   RepoResponse,
   RepoKind,
 } from '../shared/messages';
+import type { NotebookOverview, StudioDoc } from '../shared/types';
+import type { DocGraph } from '../shared/docGraph';
 
 // pdf.js needs a DOM/worker context the service worker can't provide, so it
 // runs in an offscreen document created on demand.
@@ -221,6 +223,38 @@ export function repoExport(): Promise<RepoResponse> {
 
 export function repoImport(repos: ExportedRepo[]): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'import', repos });
+}
+
+export function notebookGet(repo: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'notebookGet', repo });
+}
+
+export function notebookSet(repo: string, overview: NotebookOverview): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'notebookSet', repo, overview });
+}
+
+export function notebookSample(repo: string, maxChunks?: number): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'notebookSample', repo, maxChunks });
+}
+
+export function graphGet(repo: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'graphGet', repo });
+}
+
+export function graphSet(repo: string, graph: DocGraph): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'graphSet', repo, graph });
+}
+
+export function docChunks(repo: string, docId: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'docChunks', repo, docId });
+}
+
+export function studioGet(repo: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'studioGet', repo });
+}
+
+export function studioSet(repo: string, doc: StudioDoc): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'studioSet', repo, doc });
 }
 
 // ----- Products store (durable outputs from scheduled tasks/triggers) -----

@@ -434,6 +434,47 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'search_graph',
+      description:
+        'Query the knowledge graph extracted from a repository: returns the entities and relationships most relevant ' +
+        'to the query, expanded one hop, each tagged with [[sentence-id]] evidence. Prefer this over search_repo for ' +
+        'questions about how things relate, who is connected to what, or that need facts spread across multiple ' +
+        'documents (multi-hop). Cite the [[sentence-id]] tokens exactly as given. Requires a graph to have been built ' +
+        'for the repository.',
+      parameters: {
+        type: 'object',
+        properties: {
+          repo: { type: 'string', description: 'Repository (notebook) name whose graph to query.' },
+          query: { type: 'string', description: 'What to look for (entity names or a relationship question).' },
+          k: { type: 'number', description: 'How many seed entities to expand from (default 8).' },
+        },
+        required: ['repo', 'query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'global_search',
+      description:
+        'Answer a corpus-level question about a repository (notebook) by synthesizing across its knowledge-graph ' +
+        'themes. Use for broad "what are the main themes / how does it all fit together / summarize the whole ' +
+        'collection" questions that no single passage or entity answers. Returns each theme with a summary and ' +
+        '[[sentence-id]] evidence; synthesize an answer across them and cite the ids. Requires a graph with themes ' +
+        'to have been built.',
+      parameters: {
+        type: 'object',
+        properties: {
+          repo: { type: 'string', description: 'Repository (notebook) name whose themes to synthesize.' },
+          query: { type: 'string', description: 'The corpus-level question.' },
+        },
+        required: ['repo', 'query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'list_repos',
       description: 'List the on-device repositories with their document and chunk counts.',
       parameters: { type: 'object', properties: {}, required: [] },
@@ -1037,6 +1078,8 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   'list_scheduled_tasks',
   'read_tab_group',
   'search_repo',
+  'search_graph',
+  'global_search',
   'list_repos',
   'use_skill',
   'set_plan',

@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CapabilityRegistryEntry } from '../shared/capabilities';
 import type { SidebarCommand } from '../shared/messages';
-import type { AgentStatus, ChatMessageView, DataExport, FileArtifact, SiteEntry, Skill } from '../shared/types';
+import type { AgentStatus, ChatMessageView, Citation, DataExport, FileArtifact, SiteEntry, Skill } from '../shared/types';
 import { UPLOAD_ACCEPT } from '../shared/uploadFile';
 import { captureDrop, clipboardIsEmail, itemsFromFiles, type DroppedItem } from './dropCapture';
 import { capabilityBookmarkCandidates, dedupeBookmarkCandidates, filterBookmarkMentions, flattenBookmarkTree } from './bookmarkMentions';
@@ -21,6 +21,7 @@ import { UploadBanner } from './UploadBanner';
 import { saveFile } from './download';
 import { useT } from './i18n';
 import { Markdown } from './Markdown';
+import { CitationView } from './CitationView';
 
 function toCsv(columns: string[], rows: string[][]): string {
   const esc = (v: string) => (/[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
@@ -190,6 +191,8 @@ export function ChatPanel({
   // itself is uncontrolled — never re-render its content from state.
   const [text, setText] = useState('');
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  // The sentence-level citation currently being inspected (chip click), or null.
+  const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
   const [skills, setSkills] = useState<Skill[]>([]);
   // Voice prompts: available only when a transcription model is configured.
   const [hasTranscription, setHasTranscription] = useState(false);
@@ -550,6 +553,7 @@ export function ChatPanel({
 
   return (
     <div class="chat">
+      {activeCitation && <CitationView citation={activeCitation} onClose={() => setActiveCitation(null)} />}
       <div class="chat-messages" ref={listRef}>
         {messages.length === 0 && (
           <div class="chat-empty">
@@ -566,7 +570,7 @@ export function ChatPanel({
             {m.images && m.images.length > 0 && <MessageImages images={m.images} />}
             {m.role === 'assistant' ? (
               <>
-                <Markdown text={body} />
+                <Markdown text={body} citations={m.citations} onCiteClick={setActiveCitation} />
                 {sources && (
                   <div class="citations">
                     <Markdown text={sources} />

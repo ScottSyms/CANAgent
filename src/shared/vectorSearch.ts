@@ -4,13 +4,37 @@
 // implementation of how query vectors are normalized, quantized, and scored
 // against the stored int8 vectors.
 
+import type { CitableSentence } from './sentenceSplit';
+
 export const QUANT = 127;
+
+/**
+ * A chunk as seen by the search functions. `chunkId`/`sentences` carry
+ * sentence-level provenance (see src/shared/sentenceSplit.ts) when the store
+ * supplies it; both are optional so legacy call sites and tests still type-check.
+ */
+export interface ChunkInput {
+  name: string;
+  url: string;
+  text: string;
+  chunkId?: string;
+  sentences?: CitableSentence[];
+}
 
 export interface SearchHit {
   text: string;
   name: string;
   url: string;
   score: number;
+  /** Stable chunk identifier (`${docId}:c${localChunkIdx}`), when known. */
+  chunkId?: string;
+  /** Citable sentence spans within `text`, when the store carries provenance. */
+  sentences?: CitableSentence[];
+}
+
+/** Project a scored chunk into a SearchHit, carrying provenance fields through. */
+export function chunkToHit(c: ChunkInput, score: number): SearchHit {
+  return { text: c.text, name: c.name, url: c.url, score, chunkId: c.chunkId, sentences: c.sentences };
 }
 
 /** L2-normalize a vector (zero vectors are left as-is via the `|| 1` guard). */
@@ -38,7 +62,7 @@ export interface SearchParams {
   /** Packed int8 vectors: chunkCount × dim, row i at [i*dim, (i+1)*dim). */
   vectors: Int8Array;
   /** Chunk records aligned to the vector rows. */
-  chunks: Array<{ name: string; url: string; text: string }>;
+  chunks: ChunkInput[];
   queryVector: number[];
   k: number;
 }
@@ -82,7 +106,7 @@ export function searchVectors(params: SearchParams): SearchHit[] {
     .slice(0, k)
     .map(({ i, score }) => {
       const c = chunks[i];
-      return c ? { text: c.text, name: c.name, url: c.url, score } : null;
+      return c ? chunkToHit(c, score) : null;
     })
     .filter((r): r is SearchHit => r !== null);
 }

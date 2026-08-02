@@ -37,6 +37,7 @@ import type {
   AgentStatus,
   AuthState,
   ChatMessageView,
+  Citation,
   PageContent,
   PlanStepStatus,
   PlanView,
@@ -84,9 +85,13 @@ import { extractJsonObject, runScopedSubtask, type ScopedSubtaskInput } from './
 import { startJob } from './jobEngine';
 import { DEFAULT_RESEARCH_LIMITS } from '../shared/jobs';
 import { deriveStepBudget, findSimilarLesson, parseLesson, parseReflectionVerdict, parseSummaryArray, relevantLessons, repairToolPairing, withMergedSystemState } from './loopHelpers';
-import { generateDocument, generatePresentation, productSave, repoDeleteDoc, repoDocs, repoList, repoSearch } from './offscreenClient';
+import { generateDocument, generatePresentation, graphGet as repoGraphGet, productSave, repoDeleteDoc, repoDocs, repoList, repoSearch } from './offscreenClient';
+import { selectSubgraph, renderSubgraphForModel, type DocGraph } from '../shared/docGraph';
+import { renderCommunitiesForModel } from '../shared/graphCommunities';
+import { resolveSentenceCitations } from './sentenceResolve';
 import { normalizeSlides } from '../shared/slides';
 import type { SearchHit } from '../shared/vectorSearch';
+import { citationTokenRe } from '../shared/citations';
 import { ingestTab } from './repoIngest';
 import { getAccessToken } from './graphAuth';
 import { graphGet, graphPostJson } from './graphClient';
@@ -361,6 +366,9 @@ Working method:
 - To work with a video (YouTube or any captioned video on the page) — summarize it, answer about it, find a moment — call get_video_transcript; it reads the page's existing captions instantly. Do not try to watch or listen to the video. If it reports no captions, say so.
 - Some web pages expose their own in-page tools via WebMCP (navigator.modelContext). On the active tab, call list_webmcp_tools to discover them; when one matches the task, prefer call_webmcp_tool over hand-driving the page UI.
 - Local repositories: the user can save pages into named on-device repositories (OPFS). Use add_to_repo to capture the current page or this conversation's tab group into a repo, and search_repo to retrieve relevant passages from a repo and answer from them — cite each passage's page name and URL. Prefer search_repo for questions about pages the user has saved; list_repos shows what exists.
+- A repository may also have an extracted knowledge graph. For questions about how entities relate, who/what is connected, or that need facts spread across several documents (multi-hop), call search_graph on that repo before or alongside search_repo; it returns the relevant entities and relationships, each with [[sentence-id]] evidence. If it reports no graph has been built, fall back to search_repo.
+- For broad, corpus-level questions about a repository — "what are the main themes", "summarize this whole collection", "how does it all fit together" — call global_search on that repo: it returns the notebook's themes (graph communities) with [[sentence-id]] evidence to synthesize across. Use search_repo/search_graph for specific facts; use global_search for the big picture.
+- search_repo passages are returned as sentences each prefixed with a [[sentence-id]] token. When a statement in your answer is supported by a retrieved sentence, cite it inline by copying that sentence's [[sentence-id]] token verbatim immediately after the statement (e.g. "Model selection is done at the application level [[doc-73:c42:s4#8f31ca]]."). Cite only ids that appear in the current search results — never invent, guess, or reuse an id from earlier; unresolved ids are removed automatically. This is in addition to the Source tabs list, not a replacement.
 - The user can reference a repository (typing #) or a bookmarked page (typing @) in their message; when they do, an explicit instruction is attached — act on it directly: search_repo that exact repository, or open and read that exact URL rather than web-searching for it.
 - Endpoint-first Microsoft 365 rule: for Outlook mail, Outlook calendar, Teams meeting, SharePoint, and OneDrive retrieval, ALWAYS use the dedicated endpoint-backed tools before browser/page automation. Do not use search_web, open_url, get_tab_content, Outlook/Office web UI playbooks, or DOM automation for these data sources unless the endpoint tool returns an explicit endpoint/auth error. Mail, calendar, and draft creation are backed by Microsoft Graph (OAuth) and need a one-time Connect in Settings → Knowledge bases → Mailbox; SharePoint/OneDrive files remain a direct cookie-session call needing no separate connect step.
 - For questions about the user's own Microsoft 365 email AND/OR files, call microsoft365_search first — source ('mail'|'files'|'both'), from (sender), fileType, sitePath, editedByMe, since/until (YYYY-MM-DD), orderBy ('relevance'|'date'), top. For mail-only questions, set source:'mail'. Mail search matches on subject and sender substrings plus a date range — it does not search the message body, so a body-only phrase may miss; prefer read_office_document/read_pdf-style narrowing (recipient, subject keyword, date window) over a vague free-text query. For SharePoint/OneDrive file questions, assume the user wants the most recently modified content files unless they explicitly ask otherwise: omit orderBy or use orderBy:'date', and do not search for executables/components (the tool defaults to Office docs, PDFs, text/html, images, audio, and video unless a fileType is supplied). E.g. "last five emails from Brian Ray" → {source:'mail', from:'Brian Ray', orderBy:'date', top:5}; "the last Word file I edited on my SharePoint site" → {source:'files', fileType:'docx', editedByMe:true, top:1}. Cite each result's url. If the response has a mailError, explain that the mailbox isn't connected (or the connection expired) and ask the user to open Settings → Mailbox → Connect, then retry; only then may you fall back to the /search-mail skill or Outlook web UI. To read a file's full contents beyond its snippet, pass its url to read_office_document (Office) or read_pdf (PDFs) — do not navigate to it (that downloads it).
@@ -556,6 +564,10 @@ export class AgentRuntime {
   // false positive (site chrome with a "Sign in" link), so we proceed instead of
   // re-pausing — otherwise pagination loops pause/re-fetch forever, burning budget.
   private authResumedOrigins = new Set<string>();
+  // Sentence-level citations retrieved this turn, keyed by sentence id. search_repo
+  // populates it; the final answer's [[id]] tokens are validated against it so only
+  // genuinely-retrieved sentences can be cited (spec §6). Reset each user turn.
+  private citationRegistry = new Map<string, Citation>();
   private canDistill = false;
   private lastUserText = '';
   private taskConversationStart = 0;
@@ -812,6 +824,7 @@ export class AgentRuntime {
     this.reflectionIssues = [];
     this.planNudgesDone = 0;
     this.authResumedOrigins.clear();
+    this.citationRegistry.clear();
     this.setDistill(false);
     this.emit({ type: 'plan_update', plan: null });
     this.taskConversationStart = this.conversation.length;
@@ -1171,6 +1184,7 @@ export class AgentRuntime {
     this.reflectionIssues = [];
     this.planNudgesDone = 0;
     this.authResumedOrigins.clear();
+    this.citationRegistry.clear();
     this.setDistill(false);
     this.emit({ type: 'plan_update', plan: this.planView() });
     this.taskConversationStart = this.conversation.length;
@@ -2153,7 +2167,13 @@ export class AgentRuntime {
           }
         }
         this.conversation.push({ role: 'assistant', content: text });
-        this.pushChat({ role: 'assistant', text, timestamp: new Date().toISOString() });
+        const cited = this.resolveCitations(text);
+        this.pushChat({
+          role: 'assistant',
+          text: cited.text,
+          timestamp: new Date().toISOString(),
+          ...(cited.citations.length ? { citations: cited.citations } : {}),
+        });
         this.maybeOfferDistill();
         return;
       }
@@ -2327,7 +2347,13 @@ export class AgentRuntime {
     if (this.stopRequested) return;
     const text = reply.content ?? '(no answer)';
     this.conversation.push({ role: 'assistant', content: text });
-    this.pushChat({ role: 'assistant', text, timestamp: new Date().toISOString() });
+    const cited = this.resolveCitations(text);
+    this.pushChat({
+      role: 'assistant',
+      text: cited.text,
+      timestamp: new Date().toISOString(),
+      ...(cited.citations.length ? { citations: cited.citations } : {}),
+    });
     this.maybeOfferDistill();
   }
 
@@ -2883,7 +2909,47 @@ export class AgentRuntime {
         const result = res.result as { results?: SearchHit[] } | undefined;
         const hits = Array.isArray(result?.results) ? result.results : [];
         const reranked = await this.rerankRepoHits(settings, query, hits, finalK);
-        return JSON.stringify({ results: reranked, queries, candidateCount: hits.length });
+        // Tag each passage's sentences with their stable ids and register them so
+        // the model can cite [[id]] and the app can later validate + resolve it.
+        const results = reranked.map((h) => ({
+          name: h.name,
+          url: h.url,
+          chunkId: h.chunkId,
+          score: h.score,
+          text: this.registerCitations(h),
+        }));
+        return JSON.stringify({ results, queries, candidateCount: hits.length });
+      }
+      case 'search_graph': {
+        const repo = String(args.repo);
+        const query = String(args.query);
+        const gRes = await repoGraphGet(repo);
+        const graph = gRes.ok ? (gRes.result as DocGraph | null) : null;
+        if (!graph || graph.nodes.length === 0) {
+          return `No knowledge graph has been built for "${repo}" yet. Build it from the Knowledge page, or use search_repo instead.`;
+        }
+        const sub = selectSubgraph(graph, query, Number(args.k) || 8);
+        if (sub.nodes.length === 0) return 'No entities in the graph matched that query. Try search_repo for passage-level retrieval.';
+        // Resolve the subgraph's evidence sentence ids to citations so the model's
+        // [[id]] citations validate through the same path as search_repo answers.
+        const evidence = new Set<string>();
+        for (const n of sub.nodes) for (const id of n.evidenceSentenceIds) evidence.add(id);
+        for (const e of sub.edges) for (const id of e.evidenceSentenceIds) evidence.add(id);
+        await this.registerGraphCitations(repo, evidence);
+        return renderSubgraphForModel(sub);
+      }
+      case 'global_search': {
+        const repo = String(args.repo);
+        const gRes = await repoGraphGet(repo);
+        const graph = gRes.ok ? (gRes.result as DocGraph | null) : null;
+        const communities = graph?.communities ?? [];
+        if (communities.length === 0) {
+          return `No themes have been built for "${repo}" yet. Build or refresh its knowledge graph from the Knowledge page (themes are computed after extraction), or use search_graph / search_repo.`;
+        }
+        const evidence = new Set<string>();
+        for (const c of communities) for (const id of c.evidenceSentenceIds) evidence.add(id);
+        await this.registerGraphCitations(repo, evidence);
+        return renderCommunitiesForModel(communities);
       }
       case 'list_repos': {
         const res = await repoList();
@@ -3549,6 +3615,68 @@ export class AgentRuntime {
     } catch {
       return hits.slice(0, k);
     }
+  }
+
+  /**
+   * Render a retrieved chunk as sentence-tagged text for the model and record
+   * each sentence in the per-turn citation registry. The model sees, and cites
+   * by copying, the `[[id]]` tokens; the registry lets us later validate those
+   * citations and resolve them to the exact sentence with no re-query. Chunks
+   * without sentence spans (shouldn't occur post-enrichment) pass through as-is.
+   */
+  private registerCitations(hit: SearchHit): string {
+    const sentences = hit.sentences ?? [];
+    if (sentences.length === 0) return hit.text;
+    const lines: string[] = [];
+    for (const s of sentences) {
+      const sentenceText = hit.text.slice(s.start, s.end);
+      this.citationRegistry.set(s.id, {
+        sentenceId: s.id,
+        docName: hit.name,
+        url: hit.url,
+        ...(s.page !== undefined ? { page: s.page } : {}),
+        sentenceText,
+        chunkText: hit.text,
+        start: s.start,
+        end: s.end,
+      });
+      lines.push(`[[${s.id}]] ${sentenceText}`);
+    }
+    return lines.join('\n');
+  }
+
+  /**
+   * Resolve a set of graph-evidence sentence ids to Citations and add them to the
+   * per-turn registry, so a search_graph answer's `[[id]]` citations validate and
+   * resolve exactly like search_repo ones. Ids are grouped by their doc-id prefix
+   * and looked up in that document's chunks (offsets → sentence text) — no fuzzy
+   * matching, no re-embedding.
+   */
+  private async registerGraphCitations(repo: string, ids: Set<string>): Promise<void> {
+    for (const c of await resolveSentenceCitations(repo, [...ids])) {
+      if (!this.citationRegistry.has(c.sentenceId)) this.citationRegistry.set(c.sentenceId, c);
+    }
+  }
+
+  /**
+   * Validate the `[[id]]` citation tokens in a final answer against this turn's
+   * retrieved sentences (spec §6): keep tokens that resolve, delete fabricated
+   * ones, and collect the cited sentences in order of first appearance.
+   * Deterministic — the model's *selection* is probabilistic, validity is not.
+   */
+  private resolveCitations(text: string): { text: string; citations: Citation[] } {
+    const citations: Citation[] = [];
+    const seen = new Set<string>();
+    const cleaned = text.replace(citationTokenRe(), (_whole, rawId: string) => {
+      const rec = this.citationRegistry.get(rawId.trim());
+      if (!rec) return ''; // fabricated / stale id — remove it
+      if (!seen.has(rec.sentenceId)) {
+        seen.add(rec.sentenceId);
+        citations.push(rec);
+      }
+      return `[[${rec.sentenceId}]]`;
+    });
+    return { text: cleaned, citations };
   }
 
   private exportData(args: Record<string, unknown>): string {
