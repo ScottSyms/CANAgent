@@ -124,6 +124,10 @@ export type RuntimeRequest =
   | { type: 'repo_export' }
   | { type: 'repo_import'; repos: ExportedRepo[] }
   | { type: 'add_files_to_repo'; repo: string; files: UploadFile[]; kind?: RepoKind }
+  // Vault crypto delegated from the offscreen document to the service worker. The
+  // offscreen may lack chrome.storage (so it can't reach the wrapped DEK); the SW
+  // always has it. `state` → VaultState; `encrypt`/`decrypt` operate on one string.
+  | { type: 'vault_op'; op: 'state' | 'encrypt' | 'decrypt'; value?: string }
   // Connect (if needed) and index the user's Office 365 mailbox into a repo via
   // Microsoft Graph; incremental on repeat. Handled in the service worker.
   | { type: 'index_mailbox'; repo: string }

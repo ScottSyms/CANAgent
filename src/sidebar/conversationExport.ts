@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
-import type { ChatMessageView, DataExport, FileArtifact } from '../shared/types';
+import type { ChatMessageView, Citation, DataExport, FileArtifact } from '../shared/types';
+import { injectCitationChips } from '../shared/citations';
 import { saveFile } from './download';
 
 // marked's gfm/breaks options and DOMPurify's link hook are configured globally
@@ -61,6 +62,22 @@ function renderFileArtifact(file: FileArtifact): string {
   return `<div class="export-fileart">${escapeHtml(file.filename)}</div>`;
 }
 
+/** A numbered footnote list of the sentence-level citations for one answer. */
+function renderCitations(citations: Citation[]): string {
+  const items = citations
+    .map((c, i) => {
+      const page = c.page ? ` (p.${c.page})` : '';
+      const href = c.page && !c.url.includes('#') ? `${c.url}#page=${c.page}` : c.url;
+      return (
+        `<li><span class="cite-n">${i + 1}</span> ` +
+        `“${escapeHtml(c.sentenceText)}” — ` +
+        `<a href="${escapeHtml(href)}">${escapeHtml(c.docName)}${escapeHtml(page)}</a></li>`
+      );
+    })
+    .join('');
+  return `<ol class="export-citations">${items}</ol>`;
+}
+
 const ROLE_LABEL: Record<ChatMessageView['role'], string> = {
   user: 'You',
   assistant: 'Agent',
@@ -73,8 +90,14 @@ function renderMessage(m: ChatMessageView): string {
 
   if (m.role === 'assistant') {
     const { body, sources } = splitSources(m.text);
-    parts.push(`<div class="md">${renderMarkdown(body)}</div>`);
+    let bodyHtml = renderMarkdown(body);
+    if (m.citations && m.citations.length > 0) {
+      const numberById = new Map(m.citations.map((c, i) => [c.sentenceId, i + 1] as const));
+      bodyHtml = injectCitationChips(bodyHtml, numberById);
+    }
+    parts.push(`<div class="md">${bodyHtml}</div>`);
     if (sources) parts.push(`<div class="citations md">${renderMarkdown(sources)}</div>`);
+    if (m.citations && m.citations.length > 0) parts.push(renderCitations(m.citations));
   } else {
     // user / notice: plain text, escaped, line breaks preserved.
     parts.push(`<div class="plain">${escapeHtml(m.text).replace(/\n/g, '<br>')}</div>`);
@@ -118,6 +141,12 @@ const STYLE = `
   .md table { border-collapse: collapse; margin: .5em 0; }
   .md th, .md td { border: 1px solid #d8dbe0; padding: 4px 8px; text-align: left; }
   .citations { margin-top: 8px; padding-top: 8px; border-top: 1px solid #eceef1; font-size: 13px; color: #555; }
+  .citation-chip { display: inline-block; min-width: 14px; padding: 0 4px; margin: 0 1px; border-radius: 7px;
+    background: #dbe4ff; color: #2563eb; font-size: 10px; font-weight: 700; vertical-align: super; }
+  .export-citations { margin: 10px 0 0; padding-left: 0; list-style: none; font-size: 13px; color: #555;
+    border-top: 1px solid #eceef1; padding-top: 8px; }
+  .export-citations li { margin: 4px 0; }
+  .export-citations .cite-n { display: inline-block; min-width: 16px; font-weight: 700; color: #2563eb; }
   .msg-images { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
   .msg-image { max-width: 100%; max-height: 360px; border: 1px solid #d8dbe0; border-radius: 8px; }
   .export-table { border-collapse: collapse; margin: 8px 0; width: 100%; }

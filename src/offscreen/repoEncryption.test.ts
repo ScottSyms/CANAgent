@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { setupVault, lockVault, unlockVault } from '../background/vault';
+import { getVaultState, lockVault, setupVault, unlockVault, vaultDecrypt, vaultEncrypt } from '../background/vault';
 import { repoAdd, repoSearch } from './repoStore';
 
 // ---- OPFS fake (positional writes + keepExistingData, same surface repoStore uses) ----
@@ -82,7 +82,20 @@ async function diskText(repo: string, file: string): Promise<string> {
 beforeEach(() => {
   root = new FakeDirHandle('root');
   vi.stubGlobal('navigator', { storage: { getDirectory: async () => root } });
-  vi.stubGlobal('chrome', { storage: { local: makeArea(), session: makeArea() } });
+  // repoStore now delegates vault crypto to the service worker over a `vault_op`
+  // message (the offscreen may lack chrome.storage). Simulate that SW handler so
+  // the at-rest encryption property is still exercised through the real vault.
+  vi.stubGlobal('chrome', {
+    storage: { local: makeArea(), session: makeArea() },
+    runtime: {
+      async sendMessage(msg: { type: string; op: string; value?: string }) {
+        if (msg?.type !== 'vault_op') return undefined;
+        if (msg.op === 'state') return { state: await getVaultState() };
+        if (msg.op === 'encrypt') return { value: await vaultEncrypt(msg.value ?? '') };
+        return { value: await vaultDecrypt(msg.value ?? '') };
+      },
+    },
+  });
 });
 
 describe('repo encryption at rest', () => {

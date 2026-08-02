@@ -5,8 +5,11 @@
 import type { ExportedRepo, RepoKind } from '../shared/messages';
 import { hybridSearch, multiHybridSearch } from '../shared/hybridSearch';
 import { buildKeywordIndex, extendKeywordIndex, type KeywordIndex } from '../shared/keywordSearch';
-import { normalizeVector, quantizeVector, searchVectors, type SearchHit } from '../shared/vectorSearch';
-import { getVaultState, isVaultUnlocked, vaultDecrypt, vaultEncrypt } from '../background/vault';
+import { normalizeVector, quantizeVector, searchVectors, type ChunkInput, type SearchHit } from '../shared/vectorSearch';
+import { citableSentences, type CitableSentence } from '../shared/sentenceSplit';
+// Vault crypto is delegated to the service worker (see vaultClient): the
+// offscreen document may lack chrome.storage, so it cannot reach the DEK itself.
+import { getVaultState, isVaultUnlocked, vaultDecrypt, vaultEncrypt } from './vaultClient';
 
 // Content-bearing repo files are encrypted at rest when a vault is active
 // (specification.md §24.6): the chunk text and the keyword (BM25) index built
@@ -71,6 +74,39 @@ interface ChunkRec {
   name: string;
   url: string;
   text: string;
+  /**
+   * Citable sentence spans within `text`, cached at ingest (spec §2). Optional:
+   * chunks indexed before this feature have none and are segmented on read via
+   * `enrichChunks`. Offsets are into `text`; the sentence text is not duplicated.
+   */
+  sentences?: CitableSentence[];
+}
+
+/**
+ * Attach sentence-level provenance to raw chunk records for retrieval. Derives
+ * each chunk's stable `chunkId` (`${docId}:c${localChunkIdx}`) from the doc
+ * ranges in `meta`, and reuses cached `sentences` or recomputes them from the
+ * chunk text (legacy repos) — the derivation is deterministic, so read-time and
+ * ingest-time ids match.
+ */
+function enrichChunks(meta: RepoMeta, chunks: ChunkRec[]): ChunkInput[] {
+  const coord = new Array<{ docId: string; localIdx: number } | undefined>(chunks.length);
+  for (const d of meta.docs) {
+    for (let local = 0; local < d.chunkCount; local++) {
+      const gi = d.chunkStart + local;
+      if (gi >= 0 && gi < coord.length) coord[gi] = { docId: d.id, localIdx: local };
+    }
+  }
+  return chunks.map((c, i) => {
+    const co = coord[i] ?? { docId: c.docId, localIdx: i };
+    return {
+      name: c.name,
+      url: c.url,
+      text: c.text,
+      chunkId: `${co.docId}:c${co.localIdx}`,
+      sentences: c.sentences ?? citableSentences(co.docId, co.localIdx, c.text),
+    };
+  });
 }
 
 async function reposDir(): Promise<FileSystemDirectoryHandle> {
@@ -209,7 +245,15 @@ export async function repoAdd(
   const allChunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
   const previousChunkCount = allChunks.length;
   const docId = opts.docId ?? `doc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-  const newChunks = chunks.map((text) => ({ docId, name: doc.name, url: doc.url, text }));
+  // localChunkIdx is the chunk's position within this document, so sentence ids
+  // are stable regardless of where the doc lands in the repo.
+  const newChunks = chunks.map((text, localIdx) => ({
+    docId,
+    name: doc.name,
+    url: doc.url,
+    text,
+    sentences: citableSentences(docId, localIdx, text),
+  }));
   allChunks.push(...newChunks);
   await writeJson(dir, 'chunks.json', allChunks);
   await appendKeywordIndex(dir, previousChunkCount, newChunks, allChunks);
@@ -256,7 +300,8 @@ export async function repoSearch(
     perDimScale: meta.perDimScale,
     chunkCount: meta.chunkCount,
     vectors,
-    chunks,
+    // Attach chunkId + sentence spans so hits carry provenance to the agent.
+    chunks: enrichChunks(meta, chunks),
     k,
   };
   // Hybrid (semantic + BM25, RRF-fused) when enabled and the raw query is known;

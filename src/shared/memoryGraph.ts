@@ -16,6 +16,13 @@ export interface MemoryProvenance {
   /** URL/title of the page this fact was read from, when reflection or save_memory captured a source (e.g. an article). */
   sourceUrl?: string;
   sourceTitle?: string;
+  /**
+   * Stable sentence ids (see src/shared/sentenceSplit.ts) this fact was derived
+   * from, when it came out of retrieved repository passages. Makes sentence ids
+   * the common provenance mechanism across RAG citations and the graph (spec §9),
+   * so a relationship can be traced back to the exact source sentence.
+   */
+  evidenceSentenceIds?: string[];
 }
 
 export interface MemoryNode {

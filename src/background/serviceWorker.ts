@@ -76,6 +76,7 @@ import {
 import { probeEnvironment } from './envProbe';
 import { applyDecay, MEMORY_NODE_CAP, pruneGraph } from '../shared/memoryGraph';
 import { memoryIndexRemove, memoryIndexUpsert } from './memoryIndex';
+import { getVaultState, vaultDecrypt, vaultEncrypt } from './vault';
 
 // ----- Mailbox auto-refresh (chrome.alarms, opt-in) -----
 //
@@ -382,6 +383,22 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
   }
   if (request.type === 'repo_list') {
     repoList().then((r) => sendResponse(r.ok ? r.result : []));
+    return true;
+  }
+  if (request.type === 'vault_op') {
+    // The offscreen repo store delegates vault crypto here (it may lack storage).
+    (async () => {
+      switch (request.op) {
+        case 'state':
+          return { state: await getVaultState() };
+        case 'encrypt':
+          return { value: await vaultEncrypt(request.value ?? '') };
+        case 'decrypt':
+          return { value: await vaultDecrypt(request.value ?? '') };
+      }
+    })()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ error: String(e) }));
     return true;
   }
   if (request.type === 'job_control') {
