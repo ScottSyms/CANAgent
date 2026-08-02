@@ -18,6 +18,8 @@ import type {
   NotebookOverview,
   PlanView,
   Settings,
+  StudioDoc,
+  StudioKind,
   TabContextSummary,
   ToolActivity,
 } from './types';
@@ -137,8 +139,9 @@ export type RuntimeRequest =
   // Resolve a graph node/edge's evidence sentence ids to full citations (source
   // doc + exact sentence text) for the graph UI's evidence panel.
   | { type: 'notebook_graph_evidence'; repo: string; sentenceIds: string[] }
-  // Studio: generate a grounded briefing document for a notebook from its graph.
-  | { type: 'notebook_briefing_generate'; repo: string }
+  // Studio: read persisted outputs, or generate one (briefing/faq/study_guide).
+  | { type: 'notebook_studio_get'; repo: string }
+  | { type: 'notebook_studio_generate'; repo: string; kind: StudioKind }
   // Vault crypto delegated from the offscreen document to the service worker. The
   // offscreen may lack chrome.storage (so it can't reach the wrapped DEK); the SW
   // always has it. `state` → VaultState; `encrypt`/`decrypt` operate on one string.
@@ -421,7 +424,10 @@ export type RepoRequest =
   // fetch one doc's sentence-tagged chunks for extraction.
   | { target: 'offscreen-repo'; op: 'graphGet'; repo: string }
   | { target: 'offscreen-repo'; op: 'graphSet'; repo: string; graph: DocGraph }
-  | { target: 'offscreen-repo'; op: 'docChunks'; repo: string; docId: string };
+  | { target: 'offscreen-repo'; op: 'docChunks'; repo: string; docId: string }
+  // Notebook studio outputs (briefing / FAQ / study guide), persisted per repo.
+  | { target: 'offscreen-repo'; op: 'studioGet'; repo: string }
+  | { target: 'offscreen-repo'; op: 'studioSet'; repo: string; doc: StudioDoc };
 
 export interface RepoResponse {
   ok: boolean;

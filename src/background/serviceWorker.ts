@@ -40,7 +40,8 @@ import {
 } from './offscreenClient';
 import { generateNotebookOverview, isOverviewStale } from './notebookOverview';
 import { buildRepoGraph } from './graphExtract';
-import { generateBriefing } from './studioBriefing';
+import { generateStudioOutput } from './studioOutputs';
+import { studioGet } from './offscreenClient';
 import { resolveSentenceCitations } from './sentenceResolve';
 import type { NotebookOverview } from '../shared/types';
 import type { DocGraph } from '../shared/docGraph';
@@ -489,11 +490,17 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
       .catch((e) => sendResponse({ ok: false, error: String(e), citations: [] }));
     return true;
   }
-  if (request.type === 'notebook_briefing_generate') {
+  if (request.type === 'notebook_studio_get') {
+    studioGet(request.repo)
+      .then((r) => sendResponse({ ok: true, doc: r.ok ? r.result : { outputs: {} } }))
+      .catch((e) => sendResponse({ ok: false, error: String(e), doc: { outputs: {} } }));
+    return true;
+  }
+  if (request.type === 'notebook_studio_generate') {
     (async () => {
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
-      return generateBriefing(settings, request.repo);
+      return generateStudioOutput(settings, request.repo, request.kind);
     })()
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e) }));

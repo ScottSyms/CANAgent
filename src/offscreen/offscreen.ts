@@ -46,6 +46,8 @@ import {
   repoNotebookSample,
   repoNotebookSet,
   repoSearch,
+  repoStudioGet,
+  repoStudioSet,
 } from './repoStore';
 import { productDelete, productExportAll, productGet, productImportAll, productList, productSave } from './productStore';
 
@@ -413,6 +415,11 @@ async function handleRepo(req: RepoRequest): Promise<RepoResponse> {
         return { ok: true };
       case 'docChunks':
         return { ok: true, result: await repoDocChunks(req.repo, req.docId) };
+      case 'studioGet':
+        return { ok: true, result: await repoStudioGet(req.repo) };
+      case 'studioSet':
+        await repoStudioSet(req.repo, req.doc);
+        return { ok: true };
     }
   } catch (e) {
     return { ok: false, error: String(e) };

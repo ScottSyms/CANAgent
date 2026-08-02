@@ -25,7 +25,7 @@ import type {
   RepoResponse,
   RepoKind,
 } from '../shared/messages';
-import type { NotebookOverview } from '../shared/types';
+import type { NotebookOverview, StudioDoc } from '../shared/types';
 import type { DocGraph } from '../shared/docGraph';
 
 // pdf.js needs a DOM/worker context the service worker can't provide, so it
@@ -247,6 +247,14 @@ export function graphSet(repo: string, graph: DocGraph): Promise<RepoResponse> {
 
 export function docChunks(repo: string, docId: string): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'docChunks', repo, docId });
+}
+
+export function studioGet(repo: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'studioGet', repo });
+}
+
+export function studioSet(repo: string, doc: StudioDoc): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'studioSet', repo, doc });
 }
 
 // ----- Products store (durable outputs from scheduled tasks/triggers) -----

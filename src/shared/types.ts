@@ -446,17 +446,26 @@ export interface NotebookOverview {
   generatedAt: string;
 }
 
+/** A notebook "studio" output kind (NotebookLM-style). */
+export type StudioKind = 'briefing' | 'faq' | 'study_guide';
+
 /**
- * A generated "studio" briefing document for a notebook: grounded Markdown
- * synthesized from the repository's knowledge graph, with sentence-level
- * citations resolved for click-through (same substrate as chat answers).
+ * A generated "studio" output for a notebook: grounded Markdown synthesized from
+ * the repository's knowledge graph, with sentence-level citations resolved for
+ * click-through (same substrate as chat answers).
  */
-export interface Briefing {
+export interface StudioOutput {
+  kind: StudioKind;
   title: string;
   /** Markdown body with inline [[sentence-id]] citation tokens. */
   markdown: string;
   citations: Citation[];
   generatedAt: string;
+}
+
+/** All studio outputs generated for one notebook (persisted per repo). */
+export interface StudioDoc {
+  outputs: Partial<Record<StudioKind, StudioOutput>>;
 }
 
 /** A generated binary document offered to the user as a download. */

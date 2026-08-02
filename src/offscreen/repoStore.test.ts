@@ -10,6 +10,8 @@ import {
   repoNotebookSample,
   repoNotebookSet,
   repoSearch,
+  repoStudioGet,
+  repoStudioSet,
 } from './repoStore';
 import type { NotebookOverview } from '../shared/types';
 import { emptyDocGraph, mergeExtraction } from '../shared/docGraph';
@@ -230,6 +232,18 @@ describe('document graph', () => {
   it('returns [] for an unknown doc', async () => {
     await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
     expect(await repoDocChunks('r', 'nope')).toEqual([]);
+  });
+
+  it('round-trips studio outputs (default empty)', async () => {
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    expect(await repoStudioGet('r')).toEqual({ outputs: {} });
+    const doc = {
+      outputs: {
+        briefing: { kind: 'briefing' as const, title: 'B', markdown: '# B [[x]]', citations: [], generatedAt: '2026-01-01T00:00:00.000Z' },
+      },
+    };
+    await repoStudioSet('r', doc);
+    expect(await repoStudioGet('r')).toEqual(doc);
   });
 });
 

@@ -3,7 +3,7 @@
 // so it uses the async OPFS API (no sync access handles, which are Worker-only).
 
 import type { ExportedRepo, RepoKind } from '../shared/messages';
-import type { NotebookOverview } from '../shared/types';
+import type { NotebookOverview, StudioDoc } from '../shared/types';
 import type { DocGraph } from '../shared/docGraph';
 import { hybridSearch, multiHybridSearch } from '../shared/hybridSearch';
 import { buildKeywordIndex, extendKeywordIndex, type KeywordIndex } from '../shared/keywordSearch';
@@ -19,7 +19,7 @@ import { getVaultState, isVaultUnlocked, vaultDecrypt, vaultEncrypt } from './va
 // doc names, counts, calibration) stay plaintext so the Knowledge list still
 // works while locked. readJson/writeJson below transparently (de)crypt these two
 // files, so every call site is covered with no other change.
-const ENCRYPTED_FILES = new Set(['chunks.json', 'keywordIndex.json', 'notebook.json', 'graph.json']);
+const ENCRYPTED_FILES = new Set(['chunks.json', 'keywordIndex.json', 'notebook.json', 'graph.json', 'studio.json']);
 
 interface EncEnvelope {
   __enc: string;
@@ -538,4 +538,20 @@ export async function repoDocChunks(
   return enrichChunks(meta, chunks)
     .slice(doc.chunkStart, doc.chunkStart + doc.chunkCount)
     .map((c) => ({ chunkId: c.chunkId ?? '', text: c.text, sentences: c.sentences ?? [] }));
+}
+
+// ----- notebook studio outputs (briefing / FAQ / study guide) -----
+
+/** Read all persisted studio outputs for a repo. */
+export async function repoStudioGet(repo: string): Promise<StudioDoc> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  return readJson<StudioDoc>(dir, 'studio.json', { outputs: {} });
+}
+
+/** Persist all studio outputs for a repo. */
+export async function repoStudioSet(repo: string, doc: StudioDoc): Promise<void> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  await writeJson(dir, 'studio.json', doc);
 }

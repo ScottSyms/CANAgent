@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { buildBriefingContext, cleanBriefingCitations } from './studioBriefing';
+import { buildStudioContext, cleanCitations } from './studioOutputs';
 import { emptyDocGraph, mergeExtraction } from '../shared/docGraph';
 
-describe('buildBriefingContext', () => {
+describe('buildStudioContext', () => {
   it('includes themes (when present) and top entities, all sentence-tagged', () => {
     const g = emptyDocGraph();
     mergeExtraction(
@@ -15,7 +15,7 @@ describe('buildBriefingContext', () => {
     );
     g.communities = [{ id: 'com0', title: 'Cloud', summary: 'About cloud.', nodeIds: [], evidenceSentenceIds: ['s3'] }];
 
-    const ctx = buildBriefingContext(g);
+    const ctx = buildStudioContext(g);
     expect(ctx).toContain('Themes:');
     expect(ctx).toContain('## Cloud');
     expect(ctx).toContain('SSC —uses→ Azure');
@@ -25,16 +25,15 @@ describe('buildBriefingContext', () => {
   it('works with no communities (entities only)', () => {
     const g = emptyDocGraph();
     mergeExtraction(g, { entities: [{ label: 'A', type: 'x', summary: 's', evidence: ['s1'] }], relations: [] }, 'd');
-    const ctx = buildBriefingContext(g);
+    const ctx = buildStudioContext(g);
     expect(ctx).not.toContain('Themes:');
     expect(ctx).toContain('A (x)');
   });
 });
 
-describe('cleanBriefingCitations', () => {
+describe('cleanCitations', () => {
   it('keeps resolved ids and strips unresolved ones', () => {
     const md = 'Fact one [[doc:c0:s0#a]] and a bad one [[doc:c9:s9#z]].';
-    const out = cleanBriefingCitations(md, new Set(['doc:c0:s0#a']));
-    expect(out).toBe('Fact one [[doc:c0:s0#a]] and a bad one .');
+    expect(cleanCitations(md, new Set(['doc:c0:s0#a']))).toBe('Fact one [[doc:c0:s0#a]] and a bad one .');
   });
 });
