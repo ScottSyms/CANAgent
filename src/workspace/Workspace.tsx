@@ -200,42 +200,46 @@ export function Workspace() {
         </span>
       </header>
       <div class="ws-body">
-        <aside class="ws-sidebar">
-          <div class="ws-message-list">
-            {messages.map((m, i) => (
-              <div key={i} class={`ws-msg ws-msg-${m.role}`}>
-                {m.text && <p>{m.text.slice(0, 200)}</p>}
-                {m.dataExport && <span class="ws-tag">Table: {m.dataExport.title}</span>}
-                {m.fileArtifact && <span class="ws-tag">File: {m.fileArtifact.filename}</span>}
-                {m.images && <span class="ws-tag">{m.images.length} image(s)</span>}
-              </div>
-            ))}
-          </div>
-          {plan && (
-            <div class="ws-plan">
-              <strong>Plan</strong>
-              {plan.steps.map((s, i) => (
-                <div key={i} class={`ws-plan-step ws-plan-${s.status}`}>{s.text}</div>
+        {/* The Knowledge Base is a dedicated, full-width page — this transcript+composer
+            pane is chat context for every other view and isn't useful there. */}
+        {view !== 'knowledge' && (
+          <aside class="ws-sidebar">
+            <div class="ws-message-list">
+              {messages.map((m, i) => (
+                <div key={i} class={`ws-msg ws-msg-${m.role}`}>
+                  {m.text && <p>{m.text.slice(0, 200)}</p>}
+                  {m.dataExport && <span class="ws-tag">Table: {m.dataExport.title}</span>}
+                  {m.fileArtifact && <span class="ws-tag">File: {m.fileArtifact.filename}</span>}
+                  {m.images && <span class="ws-tag">{m.images.length} image(s)</span>}
+                </div>
               ))}
             </div>
-          )}
-          <div class="ws-composer">
-            <textarea
-              class="ws-composer-input"
-              value={input}
-              placeholder={busy ? 'Working…' : 'Message the agent…'}
-              disabled={!port}
-              onInput={(e) => setInput((e.target as HTMLTextAreaElement).value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-            />
-            <button class="ws-btn ws-btn-primary" disabled={!input.trim() || busy || !port} onClick={send}>Send</button>
-          </div>
-        </aside>
+            {plan && (
+              <div class="ws-plan">
+                <strong>Plan</strong>
+                {plan.steps.map((s, i) => (
+                  <div key={i} class={`ws-plan-step ws-plan-${s.status}`}>{s.text}</div>
+                ))}
+              </div>
+            )}
+            <div class="ws-composer">
+              <textarea
+                class="ws-composer-input"
+                value={input}
+                placeholder={busy ? 'Working…' : 'Message the agent…'}
+                disabled={!port}
+                onInput={(e) => setInput((e.target as HTMLTextAreaElement).value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    send();
+                  }
+                }}
+              />
+              <button class="ws-btn ws-btn-primary" disabled={!input.trim() || busy || !port} onClick={send}>Send</button>
+            </div>
+          </aside>
+        )}
         <main class="ws-main">
           {rightPane()}
         </main>

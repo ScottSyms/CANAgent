@@ -94,6 +94,13 @@ const IconSettings = () => (
     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
   </svg>
 );
+// Open book — launches the dedicated Knowledge Base management page.
+const IconKnowledge = () => (
+  <svg {...svgProps}>
+    <path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H11v18H4.5A2.5 2.5 0 0 1 2 17.5Z" />
+    <path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H13v18h6.5a2.5 2.5 0 0 0 2.5-2.5Z" />
+  </svg>
+);
 
 /** Prepend plain-language guidance to a raw model/endpoint error (U6). */
 function friendlyError(message: string, t: (k: string) => string): string {
@@ -450,6 +457,14 @@ export function Sidebar() {
               },
             ]}
           />
+          <button
+            class="icon-btn"
+            aria-label={t('header.knowledge')}
+            title={t('header.knowledge')}
+            onClick={() => chrome.tabs.create({ url: chrome.runtime.getURL('workspace.html#knowledge') })}
+          >
+            <IconKnowledge />
+          </button>
           <button
             class="icon-btn"
             aria-label={t('header.settings')}
