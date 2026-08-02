@@ -521,7 +521,9 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     return true;
   }
   if (request.type === 'repo_export_one') {
-    repoExportOne(request.repo).then((r) => sendResponse(r.ok ? r.result : null));
+    repoExportOne(request.repo)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }
   if (request.type === 'repo_import_one') {

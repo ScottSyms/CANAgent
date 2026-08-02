@@ -134,6 +134,7 @@ const EN: Dict = {
   'notebooks.archiveHint': 'Import a saved .kb.json notebook archive',
   'notebooks.archiveSaved': 'Exported notebook archive for “{name}”.',
   'notebooks.archiveLoaded': 'Successfully reloaded notebook “{name}”.',
+  'notebooks.archiveExportError': 'Could not export archive: {msg}',
   'notebooks.archiveError': 'Could not read archive file: {msg}',
   'repos.note':
     'On-device document stores the agent can search. It fills them when you add pages, and answers from them on demand. Stored only on this device.',
@@ -572,6 +573,7 @@ const FR: Dict = {
   'notebooks.archiveHint': 'Importer un fichier d’archive .kb.json',
   'notebooks.archiveSaved': 'Archive de carnet exportée pour « {name} ».',
   'notebooks.archiveLoaded': 'Carnet « {name} » rechargé avec succès.',
+  'notebooks.archiveExportError': 'Impossible d’exporter l’archive : {msg}',
   'notebooks.archiveError': 'Impossible de lire le fichier d’archive : {msg}',
   'repos.note':
     'Stockages de documents sur l’appareil que l’agent peut interroger. Elles se remplissent lorsque vous ajoutez des pages, et l’agent y répond à la demande. Stockées uniquement sur cet appareil.',
@@ -956,4 +958,3 @@ export function LanguageProvider({ children }: { children: ComponentChildren }) 
 export function useT(): Translator {
   return useContext(LangContext).t;
 }
-

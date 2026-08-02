@@ -250,10 +250,14 @@ export function NotebooksWorkspace() {
       const expRes = (await chrome.runtime.sendMessage({
         type: 'repo_export_one',
         repo: repoName,
-      })) as { ok: boolean; result?: ExportedRepo };
+      })) as { ok: boolean; result?: ExportedRepo; error?: string };
 
-      if (!expRes || !expRes.result) {
-        setBanner(`Could not export archive for "${repoName}".`);
+      if (!expRes?.ok || !expRes.result) {
+        setBanner(
+          t('notebooks.archiveExportError', {
+            msg: expRes?.error || `Could not export archive for "${repoName}".`,
+          }),
+        );
         return;
       }
 
@@ -273,7 +277,7 @@ export function NotebooksWorkspace() {
       );
       setBanner(t('notebooks.archiveSaved', { name: repoName }));
     } catch (e) {
-      setBanner(t('notebooks.archiveError', { msg: e instanceof Error ? e.message : String(e) }));
+      setBanner(t('notebooks.archiveExportError', { msg: e instanceof Error ? e.message : String(e) }));
     } finally {
       setExportBusy(null);
     }
