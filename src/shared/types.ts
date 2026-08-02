@@ -430,6 +430,22 @@ export interface ChatMessageView {
   citations?: Citation[];
 }
 
+/**
+ * A synthesized "notebook" view of one repository (NotebookLM-style): an overview
+ * of the corpus, its key topics, and starter questions. Derived from the repo's
+ * documents and cached per repo; `docCount`/`chunkCount` snapshot what it was
+ * generated from so the UI can detect when it is stale.
+ */
+export interface NotebookOverview {
+  overviewMarkdown: string;
+  keyTopics: string[];
+  suggestedQuestions: string[];
+  docCount: number;
+  chunkCount: number;
+  /** ISO timestamp of generation. */
+  generatedAt: string;
+}
+
 /** A generated binary document offered to the user as a download. */
 export interface FileArtifact {
   filename: string;

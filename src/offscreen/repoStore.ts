@@ -3,6 +3,8 @@
 // so it uses the async OPFS API (no sync access handles, which are Worker-only).
 
 import type { ExportedRepo, RepoKind } from '../shared/messages';
+import type { NotebookOverview } from '../shared/types';
+import type { DocGraph } from '../shared/docGraph';
 import { hybridSearch, multiHybridSearch } from '../shared/hybridSearch';
 import { buildKeywordIndex, extendKeywordIndex, type KeywordIndex } from '../shared/keywordSearch';
 import { normalizeVector, quantizeVector, searchVectors, type ChunkInput, type SearchHit } from '../shared/vectorSearch';
@@ -17,7 +19,7 @@ import { getVaultState, isVaultUnlocked, vaultDecrypt, vaultEncrypt } from './va
 // doc names, counts, calibration) stay plaintext so the Knowledge list still
 // works while locked. readJson/writeJson below transparently (de)crypt these two
 // files, so every call site is covered with no other change.
-const ENCRYPTED_FILES = new Set(['chunks.json', 'keywordIndex.json']);
+const ENCRYPTED_FILES = new Set(['chunks.json', 'keywordIndex.json', 'notebook.json', 'graph.json']);
 
 interface EncEnvelope {
   __enc: string;
@@ -458,4 +460,82 @@ export async function repoDeleteDoc(repo: string, docId: string): Promise<{ remo
   }
   await writeJson(dir, 'meta.json', meta);
   return { removed: doc.chunkCount, chunkCount: meta.chunkCount };
+}
+
+// ----- notebook overview (NotebookLM-style per-repo synthesized view) -----
+
+/** Read the cached notebook overview for a repo (null if none). Encrypted at rest. */
+export async function repoNotebookGet(repo: string): Promise<NotebookOverview | null> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  return readJson<NotebookOverview | null>(dir, 'notebook.json', null);
+}
+
+/** Persist the notebook overview for a repo. */
+export async function repoNotebookSet(repo: string, overview: NotebookOverview): Promise<void> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  await writeJson(dir, 'notebook.json', overview);
+}
+
+/**
+ * A representative sample of a repo's chunks — evenly strided across all chunks so
+ * both many-small-docs and one-large-doc repos get coverage — plus the doc
+ * catalogue and total chunk count. The background generator synthesizes the
+ * overview from this without loading the whole corpus.
+ */
+export async function repoNotebookSample(
+  repo: string,
+  maxChunks = 40,
+): Promise<{ docs: DocMeta[]; chunkCount: number; samples: Array<{ docId: string; name: string; text: string }> }> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta || meta.chunkCount === 0) return { docs: [], chunkCount: 0, samples: [] };
+  const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
+  const n = Math.min(Math.max(1, maxChunks), chunks.length);
+  const stride = Math.max(1, Math.floor(chunks.length / n));
+  const samples: Array<{ docId: string; name: string; text: string }> = [];
+  for (let i = 0; i < chunks.length && samples.length < n; i += stride) {
+    const c = chunks[i];
+    samples.push({ docId: c.docId, name: c.name, text: c.text });
+  }
+  return { docs: meta.docs, chunkCount: meta.chunkCount, samples };
+}
+
+// ----- document knowledge graph (per-notebook GraphRAG) -----
+
+/** Read the extracted knowledge graph for a repo (null if none). Encrypted at rest. */
+export async function repoGraphGet(repo: string): Promise<DocGraph | null> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  return readJson<DocGraph | null>(dir, 'graph.json', null);
+}
+
+/** Persist the extracted knowledge graph for a repo. */
+export async function repoGraphSet(repo: string, graph: DocGraph): Promise<void> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  await writeJson(dir, 'graph.json', graph);
+}
+
+/**
+ * The chunks of one document, enriched with their stable chunkId and citable
+ * sentence spans — the substrate the graph extractor tags with `[[id]]` tokens so
+ * every extracted node/edge can be grounded to exact source sentences.
+ */
+export async function repoDocChunks(
+  repo: string,
+  docId: string,
+): Promise<Array<{ chunkId: string; text: string; sentences: CitableSentence[] }>> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) return [];
+  const doc = meta.docs.find((d) => d.id === docId);
+  if (!doc) return [];
+  const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
+  return enrichChunks(meta, chunks)
+    .slice(doc.chunkStart, doc.chunkStart + doc.chunkCount)
+    .map((c) => ({ chunkId: c.chunkId ?? '', text: c.text, sentences: c.sentences ?? [] }));
 }

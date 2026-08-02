@@ -8,7 +8,9 @@ import {
   type IndexedDoc,
   type PickedFile,
 } from './folderIndex';
+import { GraphPanel } from './GraphPanel';
 import { MailboxSection } from './MailboxSection';
+import { NotebookPanel } from './NotebookPanel';
 import { RepoUpload } from './RepoUpload';
 import { SharePointSection } from './SharePointSection';
 import { UploadBanner } from './UploadBanner';
@@ -54,7 +56,7 @@ function hostOf(url: string): string {
   }
 }
 
-export function RepositoriesSection() {
+export function RepositoriesSection({ onAsk }: { onAsk?: (repo: string, question: string) => void } = {}) {
   const t = useT();
   const [repos, setRepos] = useState<RepoInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -226,6 +228,8 @@ export function RepositoriesSection() {
                   ✕
                 </button>
               </div>
+              {expanded === r.name && r.kind !== 'memory' && <NotebookPanel repo={r.name} onAsk={onAsk} />}
+              {expanded === r.name && r.kind !== 'memory' && <GraphPanel repo={r.name} />}
               {expanded === r.name && (
                 <ul class="repo-docs">
                   {docsLoading ? (

@@ -85,7 +85,9 @@ import { extractJsonObject, runScopedSubtask, type ScopedSubtaskInput } from './
 import { startJob } from './jobEngine';
 import { DEFAULT_RESEARCH_LIMITS } from '../shared/jobs';
 import { deriveStepBudget, findSimilarLesson, parseLesson, parseReflectionVerdict, parseSummaryArray, relevantLessons, repairToolPairing, withMergedSystemState } from './loopHelpers';
-import { generateDocument, generatePresentation, productSave, repoDeleteDoc, repoDocs, repoList, repoSearch } from './offscreenClient';
+import { generateDocument, generatePresentation, graphGet as repoGraphGet, productSave, repoDeleteDoc, repoDocs, repoList, repoSearch } from './offscreenClient';
+import { selectSubgraph, renderSubgraphForModel, type DocGraph } from '../shared/docGraph';
+import { resolveSentenceCitations } from './sentenceResolve';
 import { normalizeSlides } from '../shared/slides';
 import type { SearchHit } from '../shared/vectorSearch';
 import { citationTokenRe } from '../shared/citations';
@@ -363,6 +365,7 @@ Working method:
 - To work with a video (YouTube or any captioned video on the page) — summarize it, answer about it, find a moment — call get_video_transcript; it reads the page's existing captions instantly. Do not try to watch or listen to the video. If it reports no captions, say so.
 - Some web pages expose their own in-page tools via WebMCP (navigator.modelContext). On the active tab, call list_webmcp_tools to discover them; when one matches the task, prefer call_webmcp_tool over hand-driving the page UI.
 - Local repositories: the user can save pages into named on-device repositories (OPFS). Use add_to_repo to capture the current page or this conversation's tab group into a repo, and search_repo to retrieve relevant passages from a repo and answer from them — cite each passage's page name and URL. Prefer search_repo for questions about pages the user has saved; list_repos shows what exists.
+- A repository may also have an extracted knowledge graph. For questions about how entities relate, who/what is connected, or that need facts spread across several documents (multi-hop), call search_graph on that repo before or alongside search_repo; it returns the relevant entities and relationships, each with [[sentence-id]] evidence. If it reports no graph has been built, fall back to search_repo.
 - search_repo passages are returned as sentences each prefixed with a [[sentence-id]] token. When a statement in your answer is supported by a retrieved sentence, cite it inline by copying that sentence's [[sentence-id]] token verbatim immediately after the statement (e.g. "Model selection is done at the application level [[doc-73:c42:s4#8f31ca]]."). Cite only ids that appear in the current search results — never invent, guess, or reuse an id from earlier; unresolved ids are removed automatically. This is in addition to the Source tabs list, not a replacement.
 - The user can reference a repository (typing #) or a bookmarked page (typing @) in their message; when they do, an explicit instruction is attached — act on it directly: search_repo that exact repository, or open and read that exact URL rather than web-searching for it.
 - Endpoint-first Microsoft 365 rule: for Outlook mail, Outlook calendar, Teams meeting, SharePoint, and OneDrive retrieval, ALWAYS use the dedicated endpoint-backed tools before browser/page automation. Do not use search_web, open_url, get_tab_content, Outlook/Office web UI playbooks, or DOM automation for these data sources unless the endpoint tool returns an explicit endpoint/auth error. Mail, calendar, and draft creation are backed by Microsoft Graph (OAuth) and need a one-time Connect in Settings → Knowledge bases → Mailbox; SharePoint/OneDrive files remain a direct cookie-session call needing no separate connect step.
@@ -2915,6 +2918,24 @@ export class AgentRuntime {
         }));
         return JSON.stringify({ results, queries, candidateCount: hits.length });
       }
+      case 'search_graph': {
+        const repo = String(args.repo);
+        const query = String(args.query);
+        const gRes = await repoGraphGet(repo);
+        const graph = gRes.ok ? (gRes.result as DocGraph | null) : null;
+        if (!graph || graph.nodes.length === 0) {
+          return `No knowledge graph has been built for "${repo}" yet. Build it from the Knowledge page, or use search_repo instead.`;
+        }
+        const sub = selectSubgraph(graph, query, Number(args.k) || 8);
+        if (sub.nodes.length === 0) return 'No entities in the graph matched that query. Try search_repo for passage-level retrieval.';
+        // Resolve the subgraph's evidence sentence ids to citations so the model's
+        // [[id]] citations validate through the same path as search_repo answers.
+        const evidence = new Set<string>();
+        for (const n of sub.nodes) for (const id of n.evidenceSentenceIds) evidence.add(id);
+        for (const e of sub.edges) for (const id of e.evidenceSentenceIds) evidence.add(id);
+        await this.registerGraphCitations(repo, evidence);
+        return renderSubgraphForModel(sub);
+      }
       case 'list_repos': {
         const res = await repoList();
         return res.ok ? JSON.stringify(res.result) : `Error: ${res.error}`;
@@ -3607,6 +3628,19 @@ export class AgentRuntime {
       lines.push(`[[${s.id}]] ${sentenceText}`);
     }
     return lines.join('\n');
+  }
+
+  /**
+   * Resolve a set of graph-evidence sentence ids to Citations and add them to the
+   * per-turn registry, so a search_graph answer's `[[id]]` citations validate and
+   * resolve exactly like search_repo ones. Ids are grouped by their doc-id prefix
+   * and looked up in that document's chunks (offsets → sentence text) — no fuzzy
+   * matching, no re-embedding.
+   */
+  private async registerGraphCitations(repo: string, ids: Set<string>): Promise<void> {
+    for (const c of await resolveSentenceCitations(repo, [...ids])) {
+      if (!this.citationRegistry.has(c.sentenceId)) this.citationRegistry.set(c.sentenceId, c);
+    }
   }
 
   /**

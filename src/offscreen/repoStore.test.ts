@@ -1,5 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { repoAdd, repoDeleteDoc, repoList, repoSearch } from './repoStore';
+import {
+  repoAdd,
+  repoDeleteDoc,
+  repoDocChunks,
+  repoGraphGet,
+  repoGraphSet,
+  repoList,
+  repoNotebookGet,
+  repoNotebookSample,
+  repoNotebookSet,
+  repoSearch,
+} from './repoStore';
+import type { NotebookOverview } from '../shared/types';
+import { emptyDocGraph, mergeExtraction } from '../shared/docGraph';
 
 // ---- minimal in-memory OPFS fake (only the surface repoStore uses) ----
 
@@ -140,6 +153,83 @@ describe('repoStore folder metadata', () => {
     });
     const list = await repoSearch('f', vec(8, 1), 1, 'local:minilm');
     expect(list.results.length).toBe(1);
+  });
+});
+
+describe('notebook overview', () => {
+  const overview: NotebookOverview = {
+    overviewMarkdown: '## About\nArctic shipping.',
+    keyTopics: ['shipping', 'arctic'],
+    suggestedQuestions: ['What routes are covered?'],
+    docCount: 1,
+    chunkCount: 1,
+    generatedAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  it('returns null when no overview has been generated', async () => {
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    expect(await repoNotebookGet('r')).toBeNull();
+  });
+
+  it('round-trips a stored overview', async () => {
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    await repoNotebookSet('r', overview);
+    expect(await repoNotebookGet('r')).toEqual(overview);
+  });
+
+  it('samples chunks strided across the corpus, with docs and total count', async () => {
+    const five = (p: string) => [p + '0', p + '1', p + '2', p + '3', p + '4'];
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, five('a'), five('a').map((_, i) => vec(8, i)), { embedModel: 'local:minilm' });
+    await repoAdd('r', { name: 'b', url: 'file:///b' }, five('b'), five('b').map((_, i) => vec(8, i + 5)), { embedModel: 'local:minilm' });
+
+    const s = await repoNotebookSample('r', 4);
+    expect(s.chunkCount).toBe(10);
+    expect(s.docs.map((d) => d.name)).toEqual(['a', 'b']);
+    expect(s.samples.length).toBe(4); // stride = floor(10/4) = 2 → indices 0,2,4,6
+    expect(s.samples[0].text).toBe('a0');
+  });
+
+  it('handles an empty repo', async () => {
+    expect(await repoNotebookSample('empty')).toEqual({ docs: [], chunkCount: 0, samples: [] });
+  });
+});
+
+describe('document graph', () => {
+  it('round-trips a stored graph', async () => {
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    const g = emptyDocGraph();
+    mergeExtraction(g, { entities: [{ label: 'SSC', type: 'org', summary: 's', evidence: ['x'] }], relations: [] }, 'doc-1');
+    await repoGraphSet('r', g);
+    const back = await repoGraphGet('r');
+    expect(back?.nodes.map((n) => n.label)).toEqual(['SSC']);
+    expect(back?.processedDocIds).toEqual(['doc-1']);
+  });
+
+  it('returns null when no graph exists', async () => {
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    expect(await repoGraphGet('r')).toBeNull();
+  });
+
+  it('exposes a doc\'s chunks with chunkId + sentence spans for extraction', async () => {
+    const { docId } = await repoAdd(
+      'r',
+      { name: 'a', url: 'file:///a' },
+      ['First fact here. Second fact follows.'],
+      [vec(8, 1)],
+      { embedModel: 'local:minilm' },
+    );
+    const chunks = await repoDocChunks('r', docId);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].chunkId).toContain(':c0');
+    expect(chunks[0].sentences.length).toBe(2);
+    // Offsets reconstruct the sentence from the chunk text (no fuzzy matching).
+    const s = chunks[0].sentences[0];
+    expect(chunks[0].text.slice(s.start, s.end)).toBe('First fact here.');
+  });
+
+  it('returns [] for an unknown doc', async () => {
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    expect(await repoDocChunks('r', 'nope')).toEqual([]);
   });
 });
 

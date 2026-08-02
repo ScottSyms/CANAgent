@@ -15,11 +15,13 @@ import type {
   AgentStatus,
   ChatMessageView,
   ConversationLabel,
+  NotebookOverview,
   PlanView,
   Settings,
   TabContextSummary,
   ToolActivity,
 } from './types';
+import type { DocGraph } from './docGraph';
 import type { EventTrigger } from './eventTriggers';
 import type { ScheduledTaskRecurrence } from './scheduledTasks';
 import type { Workflow } from './workflows';
@@ -124,6 +126,17 @@ export type RuntimeRequest =
   | { type: 'repo_export' }
   | { type: 'repo_import'; repos: ExportedRepo[] }
   | { type: 'add_files_to_repo'; repo: string; files: UploadFile[]; kind?: RepoKind }
+  // Notebook overview (NotebookLM-style): read the cached overview (+ staleness),
+  // or (re)generate and persist it from the repo's documents.
+  | { type: 'notebook_overview_get'; repo: string }
+  | { type: 'notebook_overview_generate'; repo: string }
+  // Document knowledge graph: read the extracted graph (+ progress), or build/
+  // resume/rebuild it from the repo's documents.
+  | { type: 'notebook_graph_get'; repo: string }
+  | { type: 'notebook_graph_build'; repo: string; rebuild?: boolean }
+  // Resolve a graph node/edge's evidence sentence ids to full citations (source
+  // doc + exact sentence text) for the graph UI's evidence panel.
+  | { type: 'notebook_graph_evidence'; repo: string; sentenceIds: string[] }
   // Vault crypto delegated from the offscreen document to the service worker. The
   // offscreen may lack chrome.storage (so it can't reach the wrapped DEK); the SW
   // always has it. `state` → VaultState; `encrypt`/`decrypt` operate on one string.
@@ -396,7 +409,17 @@ export type RepoRequest =
   | { target: 'offscreen-repo'; op: 'docs'; repo: string }
   | { target: 'offscreen-repo'; op: 'deleteDoc'; repo: string; docId: string }
   | { target: 'offscreen-repo'; op: 'export' }
-  | { target: 'offscreen-repo'; op: 'import'; repos: ExportedRepo[] };
+  | { target: 'offscreen-repo'; op: 'import'; repos: ExportedRepo[] }
+  // Notebook overview (NotebookLM-style): cached per-repo synthesized view, plus a
+  // strided chunk sample the background generator synthesizes it from.
+  | { target: 'offscreen-repo'; op: 'notebookGet'; repo: string }
+  | { target: 'offscreen-repo'; op: 'notebookSet'; repo: string; overview: NotebookOverview }
+  | { target: 'offscreen-repo'; op: 'notebookSample'; repo: string; maxChunks?: number }
+  // Per-notebook document knowledge graph: read/write the extracted graph, and
+  // fetch one doc's sentence-tagged chunks for extraction.
+  | { target: 'offscreen-repo'; op: 'graphGet'; repo: string }
+  | { target: 'offscreen-repo'; op: 'graphSet'; repo: string; graph: DocGraph }
+  | { target: 'offscreen-repo'; op: 'docChunks'; repo: string; docId: string };
 
 export interface RepoResponse {
   ok: boolean;
