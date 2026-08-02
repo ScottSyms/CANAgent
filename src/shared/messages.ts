@@ -137,6 +137,8 @@ export type RuntimeRequest =
   // Resolve a graph node/edge's evidence sentence ids to full citations (source
   // doc + exact sentence text) for the graph UI's evidence panel.
   | { type: 'notebook_graph_evidence'; repo: string; sentenceIds: string[] }
+  // Studio: generate a grounded briefing document for a notebook from its graph.
+  | { type: 'notebook_briefing_generate'; repo: string }
   // Vault crypto delegated from the offscreen document to the service worker. The
   // offscreen may lack chrome.storage (so it can't reach the wrapped DEK); the SW
   // always has it. `state` → VaultState; `encrypt`/`decrypt` operate on one string.

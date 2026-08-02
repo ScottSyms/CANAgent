@@ -12,6 +12,7 @@ import { GraphPanel } from './GraphPanel';
 import { MailboxSection } from './MailboxSection';
 import { NotebookPanel } from './NotebookPanel';
 import { RepoUpload } from './RepoUpload';
+import { StudioPanel } from './StudioPanel';
 import { SharePointSection } from './SharePointSection';
 import { UploadBanner } from './UploadBanner';
 import { useT } from './i18n';
@@ -230,6 +231,7 @@ export function RepositoriesSection({ onAsk }: { onAsk?: (repo: string, question
               </div>
               {expanded === r.name && r.kind !== 'memory' && <NotebookPanel repo={r.name} onAsk={onAsk} />}
               {expanded === r.name && r.kind !== 'memory' && <GraphPanel repo={r.name} />}
+              {expanded === r.name && r.kind !== 'memory' && <StudioPanel repo={r.name} />}
               {expanded === r.name && (
                 <ul class="repo-docs">
                   {docsLoading ? (

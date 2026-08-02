@@ -40,6 +40,7 @@ import {
 } from './offscreenClient';
 import { generateNotebookOverview, isOverviewStale } from './notebookOverview';
 import { buildRepoGraph } from './graphExtract';
+import { generateBriefing } from './studioBriefing';
 import { resolveSentenceCitations } from './sentenceResolve';
 import type { NotebookOverview } from '../shared/types';
 import type { DocGraph } from '../shared/docGraph';
@@ -486,6 +487,16 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     resolveSentenceCitations(request.repo, request.sentenceIds)
       .then((citations) => sendResponse({ ok: true, citations }))
       .catch((e) => sendResponse({ ok: false, error: String(e), citations: [] }));
+    return true;
+  }
+  if (request.type === 'notebook_briefing_generate') {
+    (async () => {
+      const settings = await getSettings();
+      if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
+      return generateBriefing(settings, request.repo);
+    })()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }
   if (request.type === 'repo_doc_delete') {

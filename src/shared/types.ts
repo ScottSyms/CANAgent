@@ -446,6 +446,19 @@ export interface NotebookOverview {
   generatedAt: string;
 }
 
+/**
+ * A generated "studio" briefing document for a notebook: grounded Markdown
+ * synthesized from the repository's knowledge graph, with sentence-level
+ * citations resolved for click-through (same substrate as chat answers).
+ */
+export interface Briefing {
+  title: string;
+  /** Markdown body with inline [[sentence-id]] citation tokens. */
+  markdown: string;
+  citations: Citation[];
+  generatedAt: string;
+}
+
 /** A generated binary document offered to the user as a download. */
 export interface FileArtifact {
   filename: string;
