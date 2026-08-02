@@ -371,14 +371,31 @@ skill**, **Import from URL**, **Import JSON**, **Export JSON**, **Import zip**, 
   the workflow into a new skill via a button (the chip in §5.3) — the same
   packaging step as above, just triggered from the UI instead of by asking.
 
-### 5.7 Knowledge bases (save pages and ask later)
+### 5.7 Knowledge bases & Notebooks Workspace
 
-**Purpose:** keep a private, on-device library of pages and ask questions across
+**Purpose:** keep a private, on-device library of pages, documents, and folders and ask questions across
 them, with citations. **Add pages** with the toolbar's knowledge-base row
 (**Add tab** / **Add group**) or by asking the agent to "save this page to a
 knowledge base called X." **Ask** by typing `#name` in the chat, or "search my X
-knowledge base for …". **Manage** them under **Workspace → Knowledge**
-(see documents, chunk counts, and delete).
+knowledge base for …". **Manage** them in the dedicated **Notebooks** workspace (`notebooks.html`).
+
+![Notebooks workspace — Master-Detail view with AI Overview, Concept Graph, Studio Artifacts, and Document list](user-guide/screenshots/09-notebooks-master-detail.png)
+
+![Notebooks workspace — Ingestion & Indexing tab with Local Folders, SharePoint, and O365 Mailbox connectors](user-guide/screenshots/10-notebooks-ingestion.png)
+
+The **Notebooks Workspace** is divided into two primary sub-tabs:
+
+1. **Notebooks Tab (Master-Detail View):**
+   - **Left Master List:** Search and filter your notebooks by name. Click any notebook card to inspect its contents.
+   - **Right Detail Pane:**
+     - **📄 Overview:** AI-generated summary, key topic pills, and interactive suggested questions.
+     - **🕸️ Concept Graph:** Interactive radial entity relationship map, extracted thematic communities, and evidence sentence citations.
+     - **🎓 Studio Artifacts:** Auto-generated grounded Briefings, FAQs, and Study Guides.
+     - **📁 Documents:** Searchable document index with doc-level delete controls.
+     - **Export Knowledge Base (HTML):** 1-click standalone HTML dump featuring a Table of Contents, AI-generated title, and hyperlinked inline reference jump-links.
+
+2. **Indexing Tab:**
+   - Ingest new documents via file upload, drag-and-drop local folder sync, SharePoint / OneDrive library indexing, or Office 365 Mailbox connection.
 
 > Everything is stored **on your device** (in the browser's private file storage,
 > OPFS). By default, text is turned into search vectors by an **on-device** model
@@ -559,11 +576,12 @@ memory, and backup each have their own page (described below).
 
 ### Models page — connection
 
-![Settings — Model tab](usability/screenshots/08-settings-model-tab.png)
+![Settings — Model connection settings with multi-protocol support](user-guide/screenshots/11-models-multi-protocol.png)
 
 | Setting | Default | Description | Recommended |
 |---|---|---|---|
-| **Endpoint base URL** | *(empty)* | The OpenAI-compatible API base, ending in `/v1` for most providers. | Required. Use your provider's URL. |
+| **Endpoint base URL** | *(empty)* | The API base URL for your LLM provider. | Required. Use your provider's URL. |
+| **Protocol** | `Chat Completions` | Wire protocol the endpoint speaks: **Chat Completions** (OpenAI, Azure, DeepSeek, Ollama, vLLM), **Responses** (GPT-5.x, Grok), **Anthropic Messages** (Claude, Qwen), or **Gemini native** (Gemini). | Select the protocol matching your provider. |
 | **API key** | *(empty)* | Secret key, shown as dots; stored only on your device. | Required (unless a local model needs none — enter any placeholder it accepts). |
 | **Model** | *(empty)* | Exact model name the endpoint expects. | Required. Pick a tool-calling model for automation. |
 

@@ -102,9 +102,10 @@ Click the **⚙ gear icon** in the sidebar header and fill in:
 
 | Field | What it is | Examples |
 |---|---|---|
-| **Endpoint base URL** | Any OpenAI-compatible `/v1` base | `https://api.openai.com/v1` · `http://localhost:11434/v1` (Ollama) · `http://localhost:1234/v1` (LM Studio) · an enterprise gateway |
-| **API key** | Bearer token for the endpoint | Local servers usually accept any non-empty string |
-| **Model** | Model name as the endpoint knows it | `gpt-4o`, `llama3.1`, etc. |
+| **Endpoint base URL** | API base URL for your provider | `https://api.openai.com/v1` · `https://api.anthropic.com` · `https://generativelanguage.googleapis.com` · `http://localhost:11434/v1` (Ollama) |
+| **Protocol** | Wire protocol the endpoint speaks | `Chat Completions` (OpenAI, Azure, DeepSeek, Ollama) · `Responses` (GPT-5.x, Grok) · `Anthropic Messages` (Claude, Qwen) · `Gemini native` (Gemini) |
+| **API key** | Secret key for the endpoint | Stored only on your device; local models accept any string |
+| **Model** | Model name as the endpoint knows it | `gpt-4o`, `claude-3-5-sonnet-20241022`, `gemini-1.5-pro`, `llama3.1`, etc. |
 | **Temperature / Max tokens** | Optional request parameters | Leave blank for endpoint defaults |
 | **Embedding model / endpoint / key** | Optional — local-repository embeddings. Leave the endpoint/key blank to reuse the main ones, or point them at a separate embeddings host | `text-embedding-3-small` |
 | **Transcription model / endpoint / key** | Optional — enables **voice prompts**; a Whisper-style speech-to-text model on a `/audio/transcriptions` route. Separate endpoint/key supported | `whisper-1` |
@@ -117,12 +118,12 @@ Click **Test connection** before saving — it sends a one-word prompt and shows
 Notes:
 
 - The key is stored in `chrome.storage.local` **on this device only**; it is never synced to other machines, and never sent anywhere except the endpoint you configured.
-- The model needs to support **tool calling** (OpenAI `tools`/`function` format). Models without tool support can chat but can't drive the browser.
+- Multi-protocol support translates canonical tool definitions into provider-native tool schemas across OpenAI, Anthropic, and Gemini endpoints.
 - Every model request times out after **120 seconds**, so a hung endpoint can never freeze a task permanently.
 
 <p align="center">
-  <img src="docs/usability/screenshots/08-settings-model-tab.png" alt="Workspace Models page with connection fields and the advanced groups" width="700"><br>
-  <sub><em>Workspace → Models: the connection essentials (endpoint, key, model) with Test connection, followed by the advanced groups.</em></sub>
+  <img src="docs/user-guide/screenshots/11-models-multi-protocol.png" alt="Workspace Models page with multi-protocol connection settings" width="700"><br>
+  <sub><em>Workspace → Models: connection fields supporting OpenAI Chat Completions & Responses, Anthropic Messages, and Gemini native APIs.</em></sub>
 </p>
 
 <p align="center">
