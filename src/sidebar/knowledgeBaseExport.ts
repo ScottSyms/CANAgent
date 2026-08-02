@@ -163,8 +163,82 @@ function renderCommunities(communities: CommunitySummary[], nodesById: Map<strin
   return `<h3>Thematic Communities</h3>${items}`;
 }
 
+const MAP_NODES = 24;
+const SVG_SIZE = 380;
+const PALETTE = [
+  '#2563eb', // blue
+  '#16a34a', // green
+  '#7c3aed', // violet
+  '#d97706', // amber
+  '#0d9488', // teal
+  '#db2777', // pink
+  '#dc2626', // red
+  '#475569', // slate
+];
+
+function renderGraphSvgMap(graph: DocGraph): string {
+  if (!graph || graph.nodes.length === 0) return '';
+
+  const deg = new Map<string, number>();
+  for (const e of graph.edges) {
+    deg.set(e.from, (deg.get(e.from) ?? 0) + 1);
+    deg.set(e.to, (deg.get(e.to) ?? 0) + 1);
+  }
+
+  const nodes = [...graph.nodes].sort((a, b) => (deg.get(b.id) ?? 0) - (deg.get(a.id) ?? 0)).slice(0, MAP_NODES);
+  const shown = new Set(nodes.map((n) => n.id));
+  const cx = SVG_SIZE / 2;
+  const cy = SVG_SIZE / 2;
+  const r = SVG_SIZE / 2 - 56;
+
+  const pos = new Map<string, { x: number; y: number }>();
+  nodes.forEach((n, i) => {
+    const a = (i / Math.max(1, nodes.length)) * 2 * Math.PI - Math.PI / 2;
+    pos.set(n.id, { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+  });
+
+  const edges = graph.edges.filter((e) => shown.has(e.from) && shown.has(e.to));
+
+  const comIdx = new Map<string, number>();
+  (graph.communities ?? []).forEach((c, i) => c.nodeIds.forEach((id) => comIdx.set(id, i)));
+
+  const lineSvg = edges
+    .map((e) => {
+      const a = pos.get(e.from);
+      const b = pos.get(e.to);
+      if (!a || !b) return '';
+      return `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="#cbd5e1" stroke-width="1.2" />`;
+    })
+    .join('\n');
+
+  const nodeSvg = nodes
+    .map((n) => {
+      const p = pos.get(n.id)!;
+      const ci = comIdx.get(n.id);
+      const color = ci === undefined ? '#2563eb' : PALETTE[ci % PALETTE.length];
+      const truncatedLabel = n.label.length > 20 ? `${n.label.slice(0, 19)}…` : n.label;
+      const anchor = nodeAnchor(n.id);
+      return (
+        `<a href="#${anchor}" class="svg-node" title="${escapeHtml(n.label)} (${escapeHtml(n.type)})">` +
+        `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="6" fill="${color}" stroke="#ffffff" stroke-width="1.5" />` +
+        `<text x="${p.x.toFixed(1)}" y="${(p.y - 10).toFixed(1)}" text-anchor="middle" class="svg-label">${escapeHtml(truncatedLabel)}</text>` +
+        `</a>`
+      );
+    })
+    .join('\n');
+
+  return (
+    `<div class="kb-graph-map-container">` +
+    `<div class="kb-graph-map-title">Concept Map</div>` +
+    `<svg viewBox="0 0 ${SVG_SIZE} ${SVG_SIZE}" class="kb-graph-svg">` +
+    `${lineSvg}\n${nodeSvg}` +
+    `</svg>` +
+    `</div>`
+  );
+}
+
 /**
- * Render the knowledge graph: Themes, Entities with resolved evidence, and Relationships.
+ * Render the knowledge graph: Concept Map SVG, Themes, Entities with resolved evidence, and Relationships.
  */
 export function renderGraphSection(graph: DocGraph | null, evidence: Citation[] = []): string {
   if (!graph || graph.nodes.length === 0) return '';
@@ -173,6 +247,7 @@ export function renderGraphSection(graph: DocGraph | null, evidence: Citation[] 
   return (
     `<section class="kb-section" id="knowledge-graph">` +
     `<div class="kb-section-header"><h2>3. Knowledge Graph</h2></div>` +
+    renderGraphSvgMap(graph) +
     renderCommunities(graph.communities ?? [], nodesById) +
     `<h3>Entities & Provenance</h3>` +
     graph.nodes.map((n) => renderNode(n, evidenceById)).join('') +
@@ -354,6 +429,50 @@ const KB_STYLE = `
     font-size: 16px;
     font-weight: 700;
     color: #1e293b;
+  }
+
+  /* Knowledge Graph SVG Concept Map */
+  .kb-graph-map-container {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 16px;
+    margin: 16px 0 24px;
+    text-align: center;
+  }
+  .kb-graph-map-title {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #475569;
+    margin-bottom: 8px;
+  }
+  .kb-graph-svg {
+    width: 100%;
+    max-width: 440px;
+    height: auto;
+    display: block;
+    margin: 0 auto;
+  }
+  .svg-node circle {
+    transition: transform 0.12s, r 0.12s;
+  }
+  .svg-node:hover circle {
+    r: 8px;
+    stroke: #0f172a;
+    stroke-width: 2px;
+  }
+  .svg-node .svg-label {
+    font-size: 9.5px;
+    font-weight: 500;
+    fill: #334155;
+    pointer-events: none;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .svg-node:hover .svg-label {
+    font-weight: 700;
+    fill: #0f172a;
   }
 
   /* Knowledge Graph Items */

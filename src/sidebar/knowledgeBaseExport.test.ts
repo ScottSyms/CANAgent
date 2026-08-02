@@ -96,6 +96,8 @@ describe('renderGraphSection', () => {
     expect(html).toContain(`href="#node-${azureNode.id}"`); // the edge links to the target node's anchor
     expect(html).toContain('Cloud adoption'); // theme rendered
     expect(html).toContain('id="knowledge-graph"');
+    expect(html).toContain('class="kb-graph-svg"'); // SVG concept map
+    expect(html).toContain('Concept Map');
   });
 
   it('resolves evidence to citation text when provided', () => {
