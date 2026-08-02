@@ -2,7 +2,6 @@ import { useEffect, useState } from 'preact/hooks';
 import type { BackgroundEvent } from '../shared/messages';
 import type { AgentStatus, ChatMessageView, DataExport, FileArtifact, PlanView } from '../shared/types';
 import { CapabilitiesSection } from '../sidebar/CapabilitiesSection';
-import { RepositoriesSection } from '../sidebar/RepositoriesSection';
 import { SkillsSection } from '../sidebar/SkillsSection';
 import { useT } from '../sidebar/i18n';
 import { AutomationsPage } from './AutomationsPage';
@@ -20,8 +19,8 @@ import { ProjectsPage } from './ProjectsPage';
 import { AuditPage } from './AuditPage';
 import { JobsPage } from './JobsPage';
 
-type WorkspaceView = 'chat' | 'projects' | 'knowledge' | 'tools' | 'skills' | 'models' | 'memory' | 'automations' | 'jobs' | 'products' | 'audit' | 'data' | 'image' | 'settings';
-const VALID_VIEWS: WorkspaceView[] = ['chat', 'projects', 'knowledge', 'tools', 'skills', 'models', 'memory', 'automations', 'jobs', 'products', 'audit', 'data', 'image', 'settings'];
+type WorkspaceView = 'chat' | 'projects' | 'tools' | 'skills' | 'models' | 'memory' | 'automations' | 'jobs' | 'products' | 'audit' | 'data' | 'image' | 'settings';
+const VALID_VIEWS: WorkspaceView[] = ['chat', 'projects', 'tools', 'skills', 'models', 'memory', 'automations', 'jobs', 'products', 'audit', 'data', 'image', 'settings'];
 
 function initialView(): WorkspaceView {
   const fromHash = location.hash.slice(1) as WorkspaceView;
@@ -99,15 +98,6 @@ export function Workspace() {
     switch (view) {
       case 'projects':
         return <ProjectsPage />;
-      case 'knowledge':
-        return (
-          <RepositoriesSection
-            onAsk={(repo, question) => {
-              setInput(`Using the "${repo}" knowledge base: ${question}`);
-              setView('chat');
-            }}
-          />
-        );
       case 'tools':
         return <CapabilitiesSection defaultOpen />;
       case 'skills':
@@ -181,7 +171,6 @@ export function Workspace() {
         <nav class="ws-nav">
           <button class={`ws-nav-btn ${view === 'chat' ? 'is-active' : ''}`} onClick={() => setView('chat')}>{t('workspace.nav.chat')}</button>
           <button class={`ws-nav-btn ${view === 'projects' ? 'is-active' : ''}`} onClick={() => setView('projects')}>{t('workspace.nav.projects')}</button>
-          <button class={`ws-nav-btn ${view === 'knowledge' ? 'is-active' : ''}`} onClick={() => setView('knowledge')}>{t('workspace.nav.knowledge')}</button>
           <button class={`ws-nav-btn ${view === 'memory' ? 'is-active' : ''}`} onClick={() => setView('memory')}>{t('workspace.nav.memory')}</button>
           <button class={`ws-nav-btn ${view === 'automations' ? 'is-active' : ''}`} onClick={() => setView('automations')}>{t('workspace.nav.automations')}</button>
           <button class={`ws-nav-btn ${view === 'jobs' ? 'is-active' : ''}`} onClick={() => setView('jobs')}>Jobs</button>
@@ -200,42 +189,45 @@ export function Workspace() {
         </span>
       </header>
       <div class="ws-body">
-        <aside class="ws-sidebar">
-          <div class="ws-message-list">
-            {messages.map((m, i) => (
-              <div key={i} class={`ws-msg ws-msg-${m.role}`}>
-                {m.text && <p>{m.text.slice(0, 200)}</p>}
-                {m.dataExport && <span class="ws-tag">Table: {m.dataExport.title}</span>}
-                {m.fileArtifact && <span class="ws-tag">File: {m.fileArtifact.filename}</span>}
-                {m.images && <span class="ws-tag">{m.images.length} image(s)</span>}
-              </div>
-            ))}
-          </div>
-          {plan && (
-            <div class="ws-plan">
-              <strong>Plan</strong>
-              {plan.steps.map((s, i) => (
-                <div key={i} class={`ws-plan-step ws-plan-${s.status}`}>{s.text}</div>
+        {/* The sidebar is chat context for every view and isn't useful on dedicated pages. */}
+        {view !== 'data' && view !== 'image' && (
+          <aside class="ws-sidebar">
+            <div class="ws-message-list">
+              {messages.map((m, i) => (
+                <div key={i} class={`ws-msg ws-msg-${m.role}`}>
+                  {m.text && <p>{m.text.slice(0, 200)}</p>}
+                  {m.dataExport && <span class="ws-tag">Table: {m.dataExport.title}</span>}
+                  {m.fileArtifact && <span class="ws-tag">File: {m.fileArtifact.filename}</span>}
+                  {m.images && <span class="ws-tag">{m.images.length} image(s)</span>}
+                </div>
               ))}
             </div>
-          )}
-          <div class="ws-composer">
-            <textarea
-              class="ws-composer-input"
-              value={input}
-              placeholder={busy ? 'Working…' : 'Message the agent…'}
-              disabled={!port}
-              onInput={(e) => setInput((e.target as HTMLTextAreaElement).value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-            />
-            <button class="ws-btn ws-btn-primary" disabled={!input.trim() || busy || !port} onClick={send}>Send</button>
-          </div>
-        </aside>
+            {plan && (
+              <div class="ws-plan">
+                <strong>Plan</strong>
+                {plan.steps.map((s, i) => (
+                  <div key={i} class={`ws-plan-step ws-plan-${s.status}`}>{s.text}</div>
+                ))}
+              </div>
+            )}
+            <div class="ws-composer">
+              <textarea
+                class="ws-composer-input"
+                value={input}
+                placeholder={busy ? 'Working…' : 'Message the agent…'}
+                disabled={!port}
+                onInput={(e) => setInput((e.target as HTMLTextAreaElement).value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    send();
+                  }
+                }}
+              />
+              <button class="ws-btn ws-btn-primary" disabled={!input.trim() || busy || !port} onClick={send}>Send</button>
+            </div>
+          </aside>
+        )}
         <main class="ws-main">
           {rightPane()}
         </main>

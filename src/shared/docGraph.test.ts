@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   coerceExtraction,
   emptyDocGraph,
+  markDocFailed,
+  markDocProcessed,
   mergeExtraction,
   renderSubgraphForModel,
   selectSubgraph,
@@ -95,5 +97,32 @@ describe('selectSubgraph + render', () => {
     expect(text).toContain('Relationships:');
     expect(text).toContain('SSC —uses→ Azure OpenAI [[s4]]');
     expect(text).toContain('[[s1]]');
+  });
+});
+
+describe('markDocProcessed / markDocFailed', () => {
+  it('markDocProcessed dedupes and does not duplicate processedDocIds', () => {
+    const g = emptyDocGraph();
+    markDocProcessed(g, 'doc-1');
+    markDocProcessed(g, 'doc-1');
+    expect(g.processedDocIds).toEqual(['doc-1']);
+  });
+
+  it('markDocFailed dedupes and records a reason', () => {
+    const g = emptyDocGraph();
+    markDocFailed(g, 'doc-1', 'truncated');
+    markDocFailed(g, 'doc-1', 'truncated again');
+    expect(g.failedDocIds).toEqual(['doc-1']);
+    expect(g.docErrors).toEqual({ 'doc-1': 'truncated again' });
+    expect(g.processedDocIds).toEqual([]); // failed docs stay out of processedDocIds
+  });
+
+  it('a later success clears a prior failure', () => {
+    const g = emptyDocGraph();
+    markDocFailed(g, 'doc-1', 'truncated');
+    markDocProcessed(g, 'doc-1');
+    expect(g.processedDocIds).toEqual(['doc-1']);
+    expect(g.failedDocIds).toEqual([]);
+    expect(g.docErrors).toEqual({});
   });
 });

@@ -1,11 +1,18 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { TestConnectionResponse } from '../shared/messages';
-import type { Settings } from '../shared/types';
+import type { ModelProtocol, Settings } from '../shared/types';
 import { getSettingsForEdit, saveSettings } from '../background/storage';
 import { useT } from '../sidebar/i18n';
 import { Group } from './SettingsControls';
 
 const EMPTY: Settings = { baseUrl: '', apiKey: '', model: '' };
+
+const PROTOCOLS: Array<{ value: ModelProtocol; label: string }> = [
+  { value: 'chat-completions', label: 'settings.protocolChatCompletions' },
+  { value: 'responses', label: 'settings.protocolResponses' },
+  { value: 'anthropic-messages', label: 'settings.protocolAnthropic' },
+  { value: 'gemini-native', label: 'settings.protocolGemini' },
+];
 
 // Self-contained connection settings, independent of the sidebar SettingsScreen
 // so this page can't regress the onboarding flow or its E2E coverage.
@@ -62,6 +69,7 @@ export function ModelSection() {
         baseUrl: settings.baseUrl.trim(),
         apiKey: settings.apiKey.trim(),
         model: settings.model.trim(),
+        protocol: settings.protocol,
         ideogramApiKey: settings.ideogramApiKey?.trim() || undefined,
         apiVersion: settings.apiVersion?.trim() || undefined,
       });
@@ -110,6 +118,21 @@ export function ModelSection() {
             value={settings.model}
             onInput={(e) => update({ model: (e.target as HTMLInputElement).value })}
           />
+        </label>
+
+        <label class="field">
+          <span>{t('settings.protocol')}</span>
+          <select
+            value={settings.protocol ?? 'chat-completions'}
+            onChange={(e) => update({ protocol: (e.target as HTMLSelectElement).value as ModelProtocol })}
+          >
+            {PROTOCOLS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {t(p.label)}
+              </option>
+            ))}
+          </select>
+          <span class="field-note">{t('settings.protocolNote')}</span>
         </label>
 
         <label class="field">

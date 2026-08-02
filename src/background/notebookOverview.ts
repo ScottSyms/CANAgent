@@ -8,6 +8,7 @@ import type { LlmMessage } from './llmProvider';
 import { complete, resolveModelForRole } from './llmProvider';
 import { extractJsonObject } from './scopedSubtask';
 import { notebookSample, notebookSet } from './offscreenClient';
+import { resolvePrompt } from '../shared/promptDefaults';
 import type { NotebookOverview, Settings } from '../shared/types';
 
 const SAMPLE_CHUNKS = 40;
@@ -19,14 +20,6 @@ interface CorpusSample {
   chunkCount: number;
   samples: Array<{ docId: string; name: string; text: string }>;
 }
-
-const SYSTEM_PROMPT =
-  'You are creating a "notebook" overview of a collection of documents for a reader who has not read them. ' +
-  'Base everything ONLY on the provided document list and sample passages — do not invent facts. ' +
-  'Return ONLY JSON in this exact shape: {"overview": string, "keyTopics": string[], "suggestedQuestions": string[]}. ' +
-  'overview: 2–4 short markdown paragraphs on what this collection is about, its main themes, and notable entities. ' +
-  'keyTopics: 4–8 short topic labels (2–4 words each). ' +
-  'suggestedQuestions: 4–6 specific questions a reader could ask that these documents can answer.';
 
 /** Build the user-message content from a sampled corpus, within a char budget. */
 export function buildOverviewPrompt(sample: CorpusSample): string {
@@ -44,6 +37,7 @@ export function buildOverviewPrompt(sample: CorpusSample): string {
 }
 
 export interface ParsedOverview {
+  title?: string;
   overviewMarkdown: string;
   keyTopics: string[];
   suggestedQuestions: string[];
@@ -60,18 +54,19 @@ function strList(v: unknown, cap: number): string[] {
 
 /** Parse the synthesis model's JSON reply; tolerant of fences/prose (returns null if unusable). */
 export function parseOverview(raw: string): ParsedOverview | null {
-  let obj: { overview?: unknown; keyTopics?: unknown; suggestedQuestions?: unknown } | null;
+  let obj: { title?: unknown; overview?: unknown; keyTopics?: unknown; suggestedQuestions?: unknown } | null;
   try {
     obj = extractJsonObject(raw) as typeof obj; // throws when no JSON object is present
   } catch {
     return null;
   }
   if (!obj || typeof obj !== 'object') return null;
+  const title = typeof obj.title === 'string' ? obj.title.trim() : undefined;
   const overviewMarkdown = typeof obj.overview === 'string' ? obj.overview.trim() : '';
   const keyTopics = strList(obj.keyTopics, 12);
   const suggestedQuestions = strList(obj.suggestedQuestions, 8);
   if (!overviewMarkdown && keyTopics.length === 0 && suggestedQuestions.length === 0) return null;
-  return { overviewMarkdown, keyTopics, suggestedQuestions };
+  return { title: title || undefined, overviewMarkdown, keyTopics, suggestedQuestions };
 }
 
 /** A cached overview is stale when the repo's doc/chunk counts have moved since it was made. */
@@ -100,7 +95,7 @@ export async function generateNotebookOverview(
   }
 
   const messages: LlmMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: resolvePrompt(settings.promptOverrides, 'notebookOverview') },
     { role: 'user', content: buildOverviewPrompt(sample) },
   ];
   let content: string | null;

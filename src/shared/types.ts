@@ -204,10 +204,33 @@ export interface LessonEntry {
  */
 export const DEFAULT_LOCAL_EMBED_MODEL = 'Xenova/all-MiniLM-L6-v2';
 
+/**
+ * The feature prompts a user may override (src/shared/promptDefaults.ts). Named
+ * after the feature they drive, not the underlying constant, so the mapping
+ * stays stable even if a background module's internal constant name changes.
+ */
+export type PromptKey =
+  | 'notebookOverview'
+  | 'graphExtraction'
+  | 'communitySummary'
+  | 'studioBriefing'
+  | 'studioFaq'
+  | 'studioStudyGuide';
+
 export interface Settings {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /**
+   * Which wire protocol `baseUrl` speaks. `'chat-completions'` (default,
+   * absent = this) covers any OpenAI-compatible /chat/completions endpoint —
+   * DeepSeek, GLM, MiniMax, Kimi, Ollama, vLLM, Azure OpenAI. `'responses'` is
+   * OpenAI's /responses API (GPT-5.x, Grok). `'anthropic-messages'` is
+   * Anthropic's /v1/messages API (Claude, Qwen deployments that mirror it).
+   * `'gemini-native'` is Gemini's generateContent endpoint. See
+   * src/background/adapters/ for the per-protocol request/response translation.
+   */
+  protocol?: ModelProtocol;
   /** Optional Ideogram API key used by the image-generation tool. */
   ideogramApiKey?: string;
   /**
@@ -236,6 +259,15 @@ export interface Settings {
   maxSteps?: number;
   /** Optional user instructions appended to the built-in system prompt. */
   systemPrompt?: string;
+  /**
+   * Per-feature prompt overrides — REPLACE (not append) the named default
+   * prompt when set. Covers only the notebook/graph/studio synthesis prompts
+   * (src/shared/promptDefaults.ts); the core agent system prompt and
+   * tool-behavior prompts (rerank, query-variant, reflection) are not
+   * user-editable, to avoid silently breaking tool-calling/citation behavior.
+   * A blank/whitespace-only override falls back to the default.
+   */
+  promptOverrides?: Partial<Record<PromptKey, string>>;
   /** Optional SharePoint base URL for the cookie-auth search tool. */
   sharepointBaseUrl?: string;
   /**
@@ -333,6 +365,13 @@ export interface Settings {
 export type ModelRole = 'main' | 'utility' | 'reflection' | 'plan' | 'vision';
 
 /**
+ * The wire protocol a connection (top-level Settings or a ModelProfile)
+ * speaks. See the `Settings.protocol` doc comment above for what each value
+ * covers and src/background/adapters/ for the implementation.
+ */
+export type ModelProtocol = 'chat-completions' | 'responses' | 'anthropic-messages' | 'gemini-native';
+
+/**
  * An alternate named endpoint a role can be routed to — e.g. a small local
  * model (Ollama) for cheap background work (titles, reflection, RAG
  * paraphrase/rerank) while the main chat loop stays on a stronger model.
@@ -345,6 +384,8 @@ export interface ModelProfile {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Wire protocol this profile's baseUrl speaks. Absent = 'chat-completions' (today's behavior). */
+  protocol?: ModelProtocol;
   apiVersion?: string;
   temperature?: number;
   maxTokens?: number;
@@ -437,6 +478,8 @@ export interface ChatMessageView {
  * generated from so the UI can detect when it is stale.
  */
 export interface NotebookOverview {
+  /** Optional AI-generated all-encompassing title for the notebook collection. */
+  title?: string;
   overviewMarkdown: string;
   keyTopics: string[];
   suggestedQuestions: string[];

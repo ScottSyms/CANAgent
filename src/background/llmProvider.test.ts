@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ModelProfile, Settings } from '../shared/types';
-import { apiVersion, authHeaders, buildUrl, messagesContainImage, resolveModelForRole, testConnection, type LlmMessage } from './llmProvider';
+import {
+  apiVersion,
+  authHeaders,
+  buildUrl,
+  complete,
+  messagesContainImage,
+  resolveModelForRole,
+  testConnection,
+  type LlmMessage,
+} from './llmProvider';
 
 const base: Settings = { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'gpt' };
 
@@ -88,6 +97,75 @@ describe('testConnection', () => {
 
     expect(result.ok).toBe(true);
     expect(requestBody).toMatchObject({ max_tokens: 8, temperature: 0 });
+  });
+});
+
+describe('complete (protocol dispatch)', () => {
+  it('defaults to the chat-completions adapter when protocol is unset', async () => {
+    let requestUrl: string | undefined;
+    let requestBody: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        requestUrl = String(input);
+        requestBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }), { status: 200 });
+      }),
+    );
+    const message = await complete(base, [{ role: 'user', content: 'hi' }]);
+    expect(requestUrl).toBe('https://api.example.com/v1/chat/completions');
+    expect(requestBody).toMatchObject({ model: 'gpt', messages: [{ role: 'user', content: 'hi' }] });
+    expect(message).toEqual({ role: 'assistant', content: 'ok' });
+  });
+
+  it('dispatches to the anthropic-messages adapter, translating headers, url, and response shape', async () => {
+    let requestUrl: string | undefined;
+    let headers: HeadersInit | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        requestUrl = String(input);
+        headers = init?.headers;
+        return new Response(JSON.stringify({ content: [{ type: 'text', text: 'hi from claude' }] }), { status: 200 });
+      }),
+    );
+    const anthropicSettings: Settings = { ...base, protocol: 'anthropic-messages' };
+    const message = await complete(anthropicSettings, [{ role: 'user', content: 'hi' }]);
+    expect(requestUrl).toBe('https://api.example.com/v1/v1/messages');
+    expect((headers as Record<string, string>)['x-api-key']).toBe('sk-test');
+    expect(message).toEqual({ role: 'assistant', content: 'hi from claude' });
+  });
+
+  it('dispatches to the gemini-native adapter, translating url and response shape', async () => {
+    let requestUrl: string | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        requestUrl = String(input);
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'hi from gemini' }] } }] }), { status: 200 });
+      }),
+    );
+    const geminiSettings: Settings = { ...base, protocol: 'gemini-native', model: 'gemini-3-flash' };
+    const message = await complete(geminiSettings, [{ role: 'user', content: 'hi' }]);
+    expect(requestUrl).toBe('https://api.example.com/v1/v1beta/models/gemini-3-flash:generateContent');
+    expect(message).toEqual({ role: 'assistant', content: 'hi from gemini' });
+  });
+
+  it('dispatches to the responses adapter, translating url and response shape', async () => {
+    let requestUrl: string | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        requestUrl = String(input);
+        return new Response(JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: 'hi from gpt-5' }] }] }), {
+          status: 200,
+        });
+      }),
+    );
+    const responsesSettings: Settings = { ...base, protocol: 'responses' };
+    const message = await complete(responsesSettings, [{ role: 'user', content: 'hi' }]);
+    expect(requestUrl).toBe('https://api.example.com/v1/responses');
+    expect(message).toEqual({ role: 'assistant', content: 'hi from gpt-5' });
   });
 });
 

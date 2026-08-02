@@ -823,8 +823,11 @@ body {
   padding: 0 4px;
   margin: 0 1px;
   border-radius: 7px;
-  background: var(--accent-dim);
-  color: var(--accent);
+  /* Filled accent pill with background-colored digits, so the number stays
+     legible at rest. (--accent-dim is a *darker* accent shade, not a light
+     tint, so accent-on-dim washed the number out until hover.) */
+  background: var(--accent);
+  color: var(--bg);
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
@@ -833,8 +836,7 @@ body {
   user-select: none;
 }
 .citation-chip:hover {
-  background: var(--accent);
-  color: var(--bg);
+  background: var(--accent-dim);
 }
 
 /* Citation source viewer (opened by clicking a chip) */

@@ -9,31 +9,18 @@ import { complete, resolveModelForRole } from './llmProvider';
 import { renderSubgraphForModel, type DocGraph } from '../shared/docGraph';
 import { renderCommunitiesForModel } from '../shared/graphCommunities';
 import { citationTokenRe, extractCitationIds } from '../shared/citations';
+import { resolvePrompt, STUDIO_COMMON_TAIL } from '../shared/promptDefaults';
 import { resolveSentenceCitations } from './sentenceResolve';
 import { graphGet, studioGet, studioSet } from './offscreenClient';
-import type { Settings, StudioDoc, StudioKind, StudioOutput } from '../shared/types';
+import type { PromptKey, Settings, StudioDoc, StudioKind, StudioOutput } from '../shared/types';
 
 const TOP_ENTITIES = 30;
 
-const COMMON_TAIL =
-  ' You are given the collection\'s themes and its key entities/relationships, each tagged with [[id]] evidence ' +
-  'markers. Use ONLY that material. Cite supporting sentences inline by copying the [[id]] tokens verbatim right ' +
-  'after the claims they support. Do not invent ids or facts. Output the Markdown only — no preamble or fences.';
-
-const KIND_PROMPTS: Record<StudioKind, string> = {
-  briefing:
-    'You write a concise briefing document (Markdown) about a document collection, for a reader who has not read it. ' +
-    'Structure it as: a short intro paragraph; then "## Key themes"; then "## Key entities and relationships"; then ' +
-    '"## Open questions".' +
-    COMMON_TAIL,
-  faq:
-    'You write an FAQ (Markdown) about a document collection. Produce 6–10 question/answer pairs the collection can ' +
-    'answer. Format each as "### <question>" followed by a concise answer.' +
-    COMMON_TAIL,
-  study_guide:
-    'You write a study guide (Markdown) about a document collection. Produce a "## Key concepts" section (each concept ' +
-    'a **bold term** followed by a one-sentence explanation), then a "## Review questions" section with 5–8 questions.' +
-    COMMON_TAIL,
+/** Maps a studio output kind to its overridable prompt key (kept decoupled so they can diverge). */
+const KIND_TO_PROMPT_KEY: Record<StudioKind, PromptKey> = {
+  briefing: 'studioBriefing',
+  faq: 'studioFaq',
+  study_guide: 'studioStudyGuide',
 };
 
 const KIND_TITLES: Record<StudioKind, (repo: string) => string> = {
@@ -92,8 +79,11 @@ export async function generateStudioOutput(
     return { ok: false, error: 'Build the knowledge graph for this notebook first — studio outputs are generated from it.' };
   }
 
+  // The kind-specific prompt is user-overridable; the grounding/citation tail
+  // is always force-appended after it, so an override can't drop it.
+  const systemPrompt = resolvePrompt(settings.promptOverrides, KIND_TO_PROMPT_KEY[kind]) + STUDIO_COMMON_TAIL;
   const messages: LlmMessage[] = [
-    { role: 'system', content: KIND_PROMPTS[kind] },
+    { role: 'system', content: systemPrompt },
     { role: 'user', content: buildStudioContext(graph) },
   ];
   let content: string | null;

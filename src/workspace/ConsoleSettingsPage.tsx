@@ -4,6 +4,8 @@ import { BackupRestoreSection } from '../sidebar/BackupRestoreSection';
 import { DOCS_URL } from '../sidebar/links';
 import { LANGUAGE_STORAGE_KEY, useT, type LangPref } from '../sidebar/i18n';
 import { loadIndexUrl, saveIndexUrl } from '../sidebar/playbookSettings';
+import { PromptsSection } from './PromptsSection';
+import { RemoteConfigSection } from './RemoteConfigSection';
 
 export function ConsoleSettingsPage() {
   const t = useT();
@@ -77,6 +79,10 @@ export function ConsoleSettingsPage() {
         )}
         {playbookSaved && <span class="settings-note">{t('settings.saved')}</span>}
       </div>
+
+      <PromptsSection />
+
+      <RemoteConfigSection />
 
       <BackupRestoreSection defaultOpen />
 
