@@ -50,6 +50,8 @@ export interface DocGraph {
   nodes: GraphNode[];
   edges: GraphEdge[];
   version: number;
+  /** Repository corpus revision this graph was extracted from. Absent means legacy revision 0. */
+  corpusRevision?: number;
   /** Embedder identity, reserved for a future embedding-based node index. */
   embedModel?: string;
   /** Doc ids already folded in — lets extraction resume without reprocessing. */

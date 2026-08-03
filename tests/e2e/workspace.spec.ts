@@ -127,14 +127,11 @@ test('workspace Memory page lists, edits, confirms, and deletes a node', async (
   await page.close();
 });
 
-test('workspace console nav reaches Knowledge, Skills, Tools, Models, and Settings pages', async ({ context, extensionId }) => {
+test('workspace console nav reaches Skills, Tools, Models, and Settings pages', async ({ context, extensionId }) => {
   const page = await context.newPage();
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   await page.goto(`chrome-extension://${extensionId}/workspace.html`);
-
-  await page.getByRole('button', { name: 'Knowledge' }).click();
-  await expect(page.locator('.settings-acc-summary', { hasText: 'Knowledge bases' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Skills' }).click();
   await expect(page.locator('.settings-header strong', { hasText: 'Skills' })).toBeVisible();

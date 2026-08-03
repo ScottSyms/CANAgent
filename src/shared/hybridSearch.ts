@@ -61,6 +61,8 @@ export interface HybridParams extends SearchParams {
   rrfK?: number;
   pool?: number;
   keywordIndex?: KeywordIndex;
+  /** Optional pre-ranked chunk lists from grounded retrieval sources such as a knowledge graph. */
+  supplementalRankings?: RankedItem[][];
 }
 
 export interface MultiHybridParams extends Omit<SearchParams, 'queryVector'> {
@@ -70,6 +72,8 @@ export interface MultiHybridParams extends Omit<SearchParams, 'queryVector'> {
   rrfK?: number;
   pool?: number;
   keywordIndex?: KeywordIndex;
+  /** Optional pre-ranked chunk lists from grounded retrieval sources such as a knowledge graph. */
+  supplementalRankings?: RankedItem[][];
 }
 
 /**
@@ -84,6 +88,7 @@ export function hybridSearch(params: HybridParams): SearchHit[] {
   const keyword = params.keywordIndex ? bm25RankIndexed({ index: params.keywordIndex, query }) : bm25Rank({ chunks, query });
   // No query terms matched anything lexically: nothing to fuse, just use dense.
   const lists = keyword.length > 0 ? [semantic, keyword] : [semantic];
+  for (const ranking of params.supplementalRankings ?? []) if (ranking.length > 0) lists.push(ranking);
   return fuseRRF({ lists, k, rrfK: params.rrfK, pool: params.pool })
     .map(({ i, score }) => {
       const c = chunks[i];
@@ -104,6 +109,7 @@ export function multiHybridSearch(params: MultiHybridParams): SearchHit[] {
       if (keyword.length > 0) lists.push(keyword);
     }
   }
+  for (const ranking of params.supplementalRankings ?? []) if (ranking.length > 0) lists.push(ranking);
   return fuseRRF({ lists, k, rrfK: params.rrfK, pool: params.pool })
     .map(({ i, score }) => {
       const c = chunks[i];

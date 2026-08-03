@@ -5,6 +5,7 @@
 import type { ExportedRepo, RepoKind } from '../shared/messages';
 import type { NotebookOverview, StudioDoc } from '../shared/types';
 import type { DocGraph } from '../shared/docGraph';
+import { rankGraphEvidence } from '../shared/graphRetrieval';
 import { hybridSearch, multiHybridSearch } from '../shared/hybridSearch';
 import { buildKeywordIndex, extendKeywordIndex, type KeywordIndex } from '../shared/keywordSearch';
 import { normalizeVector, quantizeVector, searchVectors, type ChunkInput, type SearchHit } from '../shared/vectorSearch';
@@ -69,6 +70,8 @@ interface RepoMeta {
   kind?: RepoKind;
   /** Embedder identity (e.g. `local:Xenova/all-MiniLM-L6-v2`) the vectors were built with. */
   embedModel?: string;
+  /** Monotonic content revision. Absent on legacy repositories means revision 0. */
+  corpusRevision?: number;
 }
 
 interface ChunkRec {
@@ -146,6 +149,21 @@ async function writeJson(dir: FileSystemDirectoryHandle, file: string, obj: unkn
   const w = await handle.createWritable();
   await w.write(payload);
   await w.close();
+}
+
+function corpusRevision(meta: RepoMeta): number {
+  return meta.corpusRevision ?? 0;
+}
+
+async function invalidateGraphArtifacts(dir: FileSystemDirectoryHandle): Promise<void> {
+  for (const file of ['graph.json', 'studio.json']) {
+    try {
+      await dir.removeEntry(file);
+    } catch {
+      // Missing artifacts are expected. Revision checks still hide a file if an
+      // underlying filesystem error prevents best-effort removal.
+    }
+  }
 }
 
 async function readVectors(dir: FileSystemDirectoryHandle): Promise<Int8Array> {
@@ -272,7 +290,9 @@ export async function repoAdd(
     ...(opts.docExtra?.size !== undefined ? { size: opts.docExtra.size } : {}),
   });
   meta.chunkCount += chunks.length;
+  meta.corpusRevision = corpusRevision(meta) + 1;
   await writeJson(dir, 'meta.json', meta);
+  await invalidateGraphArtifacts(dir);
   return { docId, chunkCount: meta.chunkCount };
 }
 
@@ -281,12 +301,21 @@ export async function repoSearch(
   queryVector: number[],
   k: number,
   embedModel?: string,
-  opts: { query?: string; hybrid?: boolean; queryVectors?: number[][]; queries?: string[] } = {},
-): Promise<{ results: SearchHit[] }> {
+  opts: { query?: string; hybrid?: boolean; graphAssist?: boolean; queryVectors?: number[][]; queries?: string[] } = {},
+): Promise<{
+  results: SearchHit[];
+  diagnostics: {
+    graphStatus: 'used' | 'disabled' | 'hybrid_disabled' | 'no_graph' | 'stale_graph' | 'no_match';
+    graphRankingCount: number;
+    graphCandidateCount: number;
+  };
+}> {
   await assertVaultUsable();
   const dir = await repoDir(repo);
   const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
-  if (!meta || meta.chunkCount === 0) return { results: [] };
+  if (!meta || meta.chunkCount === 0) {
+    return { results: [], diagnostics: { graphStatus: 'no_graph', graphRankingCount: 0, graphCandidateCount: 0 } };
+  }
   // Model lock: a query embedded by a different model can't be compared to the
   // stored vectors. Fail loudly so the caller re-indexes rather than returning junk.
   if (embedModel && meta.embedModel && meta.embedModel !== embedModel) {
@@ -297,25 +326,51 @@ export async function repoSearch(
   const vectors = await readVectors(dir);
   const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
   const keywordIndex = await readOrBuildKeywordIndex(dir, chunks);
+  const enrichedChunks = enrichChunks(meta, chunks);
   const base = {
     dim: meta.dim,
     perDimScale: meta.perDimScale,
     chunkCount: meta.chunkCount,
     vectors,
     // Attach chunkId + sentence spans so hits carry provenance to the agent.
-    chunks: enrichChunks(meta, chunks),
+    chunks: enrichedChunks,
     k,
   };
   // Hybrid (semantic + BM25, RRF-fused) when enabled and the raw query is known;
   // otherwise pure semantic. The query text is only present on the hybrid path.
   const queryVectors = opts.queryVectors?.length ? opts.queryVectors : [queryVector];
   const queries = opts.queries?.length ? opts.queries : opts.query ? [opts.query] : [];
-  const results = queryVectors.length > 1 || queries.length > 1
-    ? multiHybridSearch({ ...base, queryVectors, queries, hybrid: opts.hybrid !== false, keywordIndex })
+  const multiQuery = queryVectors.length > 1 || queries.length > 1;
+  const hybridEnabled = multiQuery ? opts.hybrid !== false : opts.hybrid === true && !!opts.query;
+  const graphEnabled = opts.graphAssist !== false && hybridEnabled;
+  const storedGraph = graphEnabled
+    ? await readJson<DocGraph | null>(dir, 'graph.json', null)
+    : null;
+  const graph = storedGraph && (storedGraph.corpusRevision ?? 0) === corpusRevision(meta) ? storedGraph : null;
+  const supplementalRankings = graph
+    ? queries.map((q) => rankGraphEvidence(graph, q, enrichedChunks)).filter((ranking) => ranking.length > 0)
+    : [];
+  let graphStatus: 'used' | 'disabled' | 'hybrid_disabled' | 'no_graph' | 'stale_graph' | 'no_match';
+  if (opts.graphAssist === false) graphStatus = 'disabled';
+  else if (!hybridEnabled) graphStatus = 'hybrid_disabled';
+  else if (!storedGraph) graphStatus = 'no_graph';
+  else if (!graph) graphStatus = 'stale_graph';
+  else if (supplementalRankings.length === 0) graphStatus = 'no_match';
+  else graphStatus = 'used';
+  const graphCandidateCount = new Set(supplementalRankings.flatMap((ranking) => ranking.map(({ i }) => i))).size;
+  const results = multiQuery
+    ? multiHybridSearch({ ...base, queryVectors, queries, hybrid: opts.hybrid !== false, keywordIndex, supplementalRankings })
     : opts.hybrid && opts.query
-      ? hybridSearch({ ...base, queryVector, query: opts.query, keywordIndex })
+      ? hybridSearch({ ...base, queryVector, query: opts.query, keywordIndex, supplementalRankings })
       : searchVectors({ ...base, queryVector });
-  return { results };
+  return {
+    results,
+    diagnostics: {
+      graphStatus,
+      graphRankingCount: supplementalRankings.length,
+      graphCandidateCount,
+    },
+  };
 }
 
 /**
@@ -379,8 +434,10 @@ export async function repoExportOne(repo: string): Promise<ExportedRepo | null> 
   const bytes = new Uint8Array(vecs.buffer, vecs.byteOffset, vecs.byteLength);
 
   const notebook = await readJson<unknown>(dir, 'notebook.json', null);
-  const graph = await readJson<unknown>(dir, 'graph.json', null);
-  const studio = await readJson<unknown>(dir, 'studio.json', null);
+  const storedGraph = await readJson<DocGraph | null>(dir, 'graph.json', null);
+  const graph = storedGraph && (storedGraph.corpusRevision ?? 0) === corpusRevision(meta) ? storedGraph : null;
+  const storedStudio = await readJson<StudioDoc | null>(dir, 'studio.json', null);
+  const studio = storedStudio && (storedStudio.corpusRevision ?? 0) === corpusRevision(meta) ? storedStudio : null;
 
   return {
     name: repo,
@@ -499,7 +556,9 @@ export async function repoDeleteDoc(repo: string, docId: string): Promise<{ remo
     meta.perDimScale = [];
     meta.embedModel = undefined;
   }
+  meta.corpusRevision = corpusRevision(meta) + 1;
   await writeJson(dir, 'meta.json', meta);
+  await invalidateGraphArtifacts(dir);
   return { removed: doc.chunkCount, chunkCount: meta.chunkCount };
 }
 
@@ -546,18 +605,43 @@ export async function repoNotebookSample(
 
 // ----- document knowledge graph (per-notebook GraphRAG) -----
 
+/** Atomically capture the document catalogue and corpus revision for a graph build. */
+export async function repoGraphSnapshot(
+  repo: string,
+): Promise<{ docs: Array<{ id: string; name: string }>; corpusRevision: number }> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) return { docs: [], corpusRevision: 0 };
+  return {
+    docs: meta.docs.map((d) => ({ id: d.id, name: d.name })),
+    corpusRevision: corpusRevision(meta),
+  };
+}
+
 /** Read the extracted knowledge graph for a repo (null if none). Encrypted at rest. */
 export async function repoGraphGet(repo: string): Promise<DocGraph | null> {
   await assertVaultUsable();
   const dir = await repoDir(repo);
-  return readJson<DocGraph | null>(dir, 'graph.json', null);
+  const [meta, graph] = await Promise.all([
+    readJson<RepoMeta | null>(dir, 'meta.json', null),
+    readJson<DocGraph | null>(dir, 'graph.json', null),
+  ]);
+  if (!meta || !graph || (graph.corpusRevision ?? 0) !== corpusRevision(meta)) return null;
+  return graph;
 }
 
-/** Persist the extracted knowledge graph for a repo. */
-export async function repoGraphSet(repo: string, graph: DocGraph): Promise<void> {
+/** Persist a graph only if the repository still matches the build's snapshot. */
+export async function repoGraphSet(repo: string, graph: DocGraph, expectedRevision: number): Promise<void> {
   await assertVaultUsable();
   const dir = await repoDir(repo);
-  await writeJson(dir, 'graph.json', graph);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) throw new Error(`Repository "${repo}" no longer exists.`);
+  const current = corpusRevision(meta);
+  if (current !== expectedRevision) {
+    throw new Error('Repository changed while the graph was being built. Rebuild the graph.');
+  }
+  await writeJson(dir, 'graph.json', { ...graph, corpusRevision: current });
 }
 
 /**
@@ -587,12 +671,23 @@ export async function repoDocChunks(
 export async function repoStudioGet(repo: string): Promise<StudioDoc> {
   await assertVaultUsable();
   const dir = await repoDir(repo);
-  return readJson<StudioDoc>(dir, 'studio.json', { outputs: {} });
+  const [meta, doc] = await Promise.all([
+    readJson<RepoMeta | null>(dir, 'meta.json', null),
+    readJson<StudioDoc>(dir, 'studio.json', { outputs: {} }),
+  ]);
+  if (!meta || (doc.corpusRevision ?? 0) !== corpusRevision(meta)) return { outputs: {} };
+  return doc;
 }
 
-/** Persist all studio outputs for a repo. */
-export async function repoStudioSet(repo: string, doc: StudioDoc): Promise<void> {
+/** Persist Studio outputs only while their source graph revision is current. */
+export async function repoStudioSet(repo: string, doc: StudioDoc, expectedRevision: number): Promise<void> {
   await assertVaultUsable();
   const dir = await repoDir(repo);
-  await writeJson(dir, 'studio.json', doc);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) throw new Error(`Repository "${repo}" no longer exists.`);
+  const current = corpusRevision(meta);
+  if (current !== expectedRevision) {
+    throw new Error('Repository changed while the Studio output was being generated. Regenerate it.');
+  }
+  await writeJson(dir, 'studio.json', { ...doc, corpusRevision: current });
 }

@@ -185,7 +185,7 @@ export function repoSearch(
   queryVector: number[],
   k: number,
   embedModel?: string,
-  opts: { query?: string; hybrid?: boolean; queryVectors?: number[][]; queries?: string[] } = {},
+  opts: { query?: string; hybrid?: boolean; graphAssist?: boolean; queryVectors?: number[][]; queries?: string[] } = {},
 ): Promise<RepoResponse> {
   return repoRequest({
     target: 'offscreen-repo',
@@ -198,6 +198,7 @@ export function repoSearch(
     query: opts.query,
     queries: opts.queries,
     hybrid: opts.hybrid,
+    graphAssist: opts.graphAssist,
   });
 }
 
@@ -249,8 +250,12 @@ export function graphGet(repo: string): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'graphGet', repo });
 }
 
-export function graphSet(repo: string, graph: DocGraph): Promise<RepoResponse> {
-  return repoRequest({ target: 'offscreen-repo', op: 'graphSet', repo, graph });
+export function graphSnapshot(repo: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'graphSnapshot', repo });
+}
+
+export function graphSet(repo: string, graph: DocGraph, expectedRevision: number): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'graphSet', repo, graph, expectedRevision });
 }
 
 export function docChunks(repo: string, docId: string): Promise<RepoResponse> {
@@ -261,8 +266,8 @@ export function studioGet(repo: string): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'studioGet', repo });
 }
 
-export function studioSet(repo: string, doc: StudioDoc): Promise<RepoResponse> {
-  return repoRequest({ target: 'offscreen-repo', op: 'studioSet', repo, doc });
+export function studioSet(repo: string, doc: StudioDoc, expectedRevision: number): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'studioSet', repo, doc, expectedRevision });
 }
 
 // ----- Products store (durable outputs from scheduled tasks/triggers) -----
@@ -306,4 +311,3 @@ export function productExport(): Promise<ProductResponse> {
 export function productImport(products: ExportedProduct[]): Promise<ProductResponse> {
   return productRequest({ target: 'offscreen-product', op: 'import', products });
 }
-

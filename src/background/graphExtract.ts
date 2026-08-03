@@ -24,7 +24,7 @@ import {
   type DocGraph,
 } from '../shared/docGraph';
 import { detectCommunities, renderCommunityForModel } from '../shared/graphCommunities';
-import { docChunks, graphGet, graphSet, repoDocs } from './offscreenClient';
+import { docChunks, graphGet, graphSet, graphSnapshot } from './offscreenClient';
 import { resolvePrompt } from '../shared/promptDefaults';
 
 const PER_DOC_BUDGET_CHARS = 12000;
@@ -247,9 +247,14 @@ export async function buildRepoGraph(
   repo: string,
   opts: { rebuild?: boolean; signal?: AbortSignal; onProgress?: (p: GraphBuildProgress) => void } = {},
 ): Promise<GraphBuildResult> {
-  const docsRes = await repoDocs(repo);
-  if (!docsRes.ok) return { ok: false, error: docsRes.error };
-  const docs = (docsRes.result as Array<{ id: string; name: string }>) ?? [];
+  const snapshotRes = await graphSnapshot(repo);
+  if (!snapshotRes.ok) return { ok: false, error: snapshotRes.error };
+  const snapshot = snapshotRes.result as {
+    docs?: Array<{ id: string; name: string }>;
+    corpusRevision?: number;
+  } | undefined;
+  const docs = snapshot?.docs ?? [];
+  const expectedRevision = snapshot?.corpusRevision ?? 0;
   if (docs.length === 0) return { ok: false, error: 'This repository has no documents to extract a graph from.' };
 
   let graph = emptyDocGraph();
@@ -257,6 +262,7 @@ export async function buildRepoGraph(
     const existing = await graphGet(repo);
     if (existing.ok && existing.result) graph = existing.result as DocGraph;
   }
+  graph.corpusRevision = expectedRevision;
   const processed = new Set(graph.processedDocIds);
   const todo = docs.filter((d) => !processed.has(d.id));
 
@@ -298,7 +304,7 @@ export async function buildRepoGraph(
     } else {
       markDocFailed(graph, doc.id, lastFailureReason || 'no content could be extracted');
     }
-    const setRes = await graphSet(repo, graph); // checkpoint after every doc
+    const setRes = await graphSet(repo, graph, expectedRevision); // checkpoint after every doc
     if (!setRes.ok) return { ok: false, error: setRes.error };
   }
 
@@ -310,7 +316,7 @@ export async function buildRepoGraph(
   const shouldSummarize = allAttempted && !opts.signal?.aborted && (opts.rebuild || !graph.communities || todo.length > 0);
   if (shouldSummarize && graph.nodes.length > 0) {
     graph.communities = await summarizeCommunities(settings, graph, opts.signal);
-    const setRes = await graphSet(repo, graph);
+    const setRes = await graphSet(repo, graph, expectedRevision);
     if (!setRes.ok) return { ok: false, error: setRes.error };
   }
 

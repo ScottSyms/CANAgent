@@ -25,6 +25,7 @@ describe('pickAllowedRemoteConfigFields', () => {
       maxTokens: 4096,
       repoSearchK: 8,
       hybridSearch: true,
+      graphAssistedSearch: false,
       maxSteps: 20,
       model: 'gpt-x',
       systemPrompt: 'be terse',

@@ -29,6 +29,7 @@ function ownFields(s: Settings): Partial<Settings> {
     systemPrompt: s.systemPrompt?.trim() || undefined,
     embedder: s.embedder === 'external' ? 'external' : 'local',
     hybridSearch: s.hybridSearch ?? true,
+    graphAssistedSearch: s.graphAssistedSearch ?? true,
     localEmbedModel: s.localEmbedModel?.trim() || undefined,
     embeddingModel: s.embeddingModel?.trim() || undefined,
     repoSearchK: s.repoSearchK,
@@ -165,6 +166,13 @@ export function AdvancedSettingsSection() {
           onChange={(checked) => update({ hybridSearch: checked })}
           label={t('settings.hybridSearch')}
           note={t('settings.hybridSearchNote')}
+        />
+
+        <Toggle
+          checked={settings.graphAssistedSearch ?? true}
+          onChange={(checked) => update({ graphAssistedSearch: checked })}
+          label={t('settings.graphAssistedSearch')}
+          note={t('settings.graphAssistedSearchNote')}
         />
 
         <div class="field-row">

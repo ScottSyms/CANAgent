@@ -16,6 +16,7 @@ export const REMOTE_CONFIG_ALLOWED_KEYS = [
   'maxTokens',
   'repoSearchK',
   'hybridSearch',
+  'graphAssistedSearch',
   'maxSteps',
   'model',
   'systemPrompt',

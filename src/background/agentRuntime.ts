@@ -2903,10 +2903,23 @@ export class AgentRuntime {
           queryVec[0],
           candidateK,
           embedderId(settings),
-          { query, queryVectors: queryVec, queries, hybrid: settings.hybridSearch !== false },
+          {
+            query,
+            queryVectors: queryVec,
+            queries,
+            hybrid: settings.hybridSearch !== false,
+            graphAssist: settings.graphAssistedSearch !== false,
+          },
         );
         if (!res.ok) return `Error: ${res.error}`;
-        const result = res.result as { results?: SearchHit[] } | undefined;
+        const result = res.result as {
+          results?: SearchHit[];
+          diagnostics?: {
+            graphStatus: string;
+            graphRankingCount: number;
+            graphCandidateCount: number;
+          };
+        } | undefined;
         const hits = Array.isArray(result?.results) ? result.results : [];
         const reranked = await this.rerankRepoHits(settings, query, hits, finalK);
         // Tag each passage's sentences with their stable ids and register them so
@@ -2918,7 +2931,7 @@ export class AgentRuntime {
           score: h.score,
           text: this.registerCitations(h),
         }));
-        return JSON.stringify({ results, queries, candidateCount: hits.length });
+        return JSON.stringify({ results, queries, candidateCount: hits.length, retrieval: result?.diagnostics });
       }
       case 'search_graph': {
         const repo = String(args.repo);

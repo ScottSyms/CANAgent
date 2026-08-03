@@ -251,6 +251,8 @@ export interface Settings {
    * `false` for pure semantic search. No re-indexing needed either way.
    */
   hybridSearch?: boolean;
+  /** Fuse fresh knowledge-graph evidence into hybrid repository retrieval. Default on. */
+  graphAssistedSearch?: boolean;
   /**
    * Max tool-iteration steps per task (the soft budget). Absent = 20. The plan
    * extension and hard ceiling scale from it: extension = round(maxSteps/2),
@@ -509,6 +511,8 @@ export interface StudioOutput {
 /** All studio outputs generated for one notebook (persisted per repo). */
 export interface StudioDoc {
   outputs: Partial<Record<StudioKind, StudioOutput>>;
+  /** Repository corpus revision these graph-derived outputs were generated from. */
+  corpusRevision?: number;
 }
 
 /** A generated binary document offered to the user as a download. */

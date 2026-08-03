@@ -111,7 +111,8 @@ export async function generateStudioOutput(
   const docRes = await studioGet(repo);
   const doc = ((docRes.ok ? docRes.result : null) as StudioDoc | null) ?? { outputs: {} };
   doc.outputs = { ...doc.outputs, [kind]: output };
-  await studioSet(repo, doc);
+  const setRes = await studioSet(repo, doc, graph.corpusRevision ?? 0);
+  if (!setRes.ok) return { ok: false, error: setRes.error ?? 'Could not save this Studio output.' };
 
   return { ok: true, output };
 }

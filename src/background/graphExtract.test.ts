@@ -6,12 +6,28 @@ vi.mock('./llmProvider', () => ({
   complete: (...a: unknown[]) => complete(...a),
   resolveModelForRole: (s: unknown) => s,
 }));
+const graphSnapshot = vi.fn();
+const graphGet = vi.fn();
+const graphSet = vi.fn();
+const docChunks = vi.fn();
+vi.mock('./offscreenClient', () => ({
+  graphSnapshot: (...a: unknown[]) => graphSnapshot(...a),
+  graphGet: (...a: unknown[]) => graphGet(...a),
+  graphSet: (...a: unknown[]) => graphSet(...a),
+  docChunks: (...a: unknown[]) => docChunks(...a),
+}));
 
-import { extractOneDoc, looksTruncated, summarizeCommunities, tagDocChunks, windowDocChunks } from './graphExtract';
+import { buildRepoGraph, extractOneDoc, looksTruncated, summarizeCommunities, tagDocChunks, windowDocChunks } from './graphExtract';
 import { emptyDocGraph, mergeExtraction } from '../shared/docGraph';
 import type { Settings } from '../shared/types';
 
-afterEach(() => complete.mockReset());
+afterEach(() => {
+  complete.mockReset();
+  graphSnapshot.mockReset();
+  graphGet.mockReset();
+  graphSet.mockReset();
+  docChunks.mockReset();
+});
 
 const S = {} as Settings;
 
@@ -201,5 +217,34 @@ describe('summarizeCommunities', () => {
     await summarizeCommunities(withOverride, g);
     const messages = complete.mock.calls.at(-1)?.[1];
     expect(messages[0]).toEqual({ role: 'system', content: 'CUSTOM COMMUNITY PROMPT' });
+  });
+});
+
+describe('buildRepoGraph corpus revision', () => {
+  it('rejects a checkpoint when the repository changes during extraction', async () => {
+    graphSnapshot.mockResolvedValue({
+      ok: true,
+      result: { docs: [{ id: 'doc-1', name: 'a.md' }], corpusRevision: 4 },
+    });
+    graphGet.mockResolvedValue({ ok: true, result: null });
+    docChunks.mockResolvedValue({
+      ok: true,
+      result: [{ text: 'A fact.', sentences: [{ id: 'doc-1:c0:s0#a', start: 0, end: 7 }] }],
+    });
+    complete.mockResolvedValue({
+      content: '{"entities":[{"label":"A","type":"x","summary":"s","evidence":["doc-1:c0:s0#a"]}],"relations":[]}',
+    });
+    graphSet.mockResolvedValue({
+      ok: false,
+      error: 'Repository changed while the graph was being built. Rebuild the graph.',
+    });
+
+    const result = await buildRepoGraph(S, 'repo');
+
+    expect(result).toEqual({
+      ok: false,
+      error: 'Repository changed while the graph was being built. Rebuild the graph.',
+    });
+    expect(graphSet).toHaveBeenCalledWith('repo', expect.objectContaining({ corpusRevision: 4 }), 4);
   });
 });

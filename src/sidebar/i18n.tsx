@@ -396,6 +396,9 @@ const EN: Dict = {
   'settings.hybridSearch': 'Hybrid search (semantic + keyword)',
   'settings.hybridSearchNote':
     'Blend semantic (meaning) and keyword (BM25) ranking so exact tokens — IDs, codes, names — surface alongside related passages. Off = pure semantic. No re-indexing needed either way.',
+  'settings.graphAssistedSearch': 'Graph-assisted retrieval',
+  'settings.graphAssistedSearchNote':
+    'Use a fresh notebook knowledge graph to promote grounded entity, relationship, and cross-document evidence during hybrid search. Enabled by default; falls back automatically when no graph is available.',
   'settings.embeddingModel':
     'Embedding model (optional) — for local repositories; defaults to the model above if blank',
   'settings.repoSearchK': 'Passages per repository search',
@@ -835,6 +838,9 @@ const FR: Dict = {
   'settings.hybridSearch': 'Recherche hybride (sémantique + mots-clés)',
   'settings.hybridSearchNote':
     'Combine le classement sémantique (sens) et par mots-clés (BM25) pour que les jetons exacts — identifiants, codes, noms — ressortent à côté des passages liés. Désactivé = purement sémantique. Aucune réindexation requise.',
+  'settings.graphAssistedSearch': 'Recherche assistée par graphe',
+  'settings.graphAssistedSearchNote':
+    'Utilise un graphe de connaissances à jour pour promouvoir les entités, relations et preuves interdocuments pendant la recherche hybride. Activée par défaut; revient automatiquement à la recherche normale sans graphe.',
   'settings.embeddingModel':
     'Modèle d’intégration (facultatif) — pour les dépôts locaux; utilise le modèle ci-dessus si vide',
   'settings.repoSearchK': 'Passages par recherche de dépôt',

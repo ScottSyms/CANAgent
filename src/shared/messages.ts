@@ -413,6 +413,8 @@ export type RepoRequest =
       queries?: string[];
       /** Fuse semantic + keyword (RRF). When false/absent, pure semantic. */
       hybrid?: boolean;
+      /** Fuse fresh graph-derived chunk rankings. Default true when hybrid search runs. */
+      graphAssist?: boolean;
     }
   | { target: 'offscreen-repo'; op: 'list' }
   | { target: 'offscreen-repo'; op: 'delete'; repo: string }
@@ -429,12 +431,13 @@ export type RepoRequest =
   | { target: 'offscreen-repo'; op: 'notebookSample'; repo: string; maxChunks?: number }
   // Per-notebook document knowledge graph: read/write the extracted graph, and
   // fetch one doc's sentence-tagged chunks for extraction.
+  | { target: 'offscreen-repo'; op: 'graphSnapshot'; repo: string }
   | { target: 'offscreen-repo'; op: 'graphGet'; repo: string }
-  | { target: 'offscreen-repo'; op: 'graphSet'; repo: string; graph: DocGraph }
+  | { target: 'offscreen-repo'; op: 'graphSet'; repo: string; graph: DocGraph; expectedRevision: number }
   | { target: 'offscreen-repo'; op: 'docChunks'; repo: string; docId: string }
   // Notebook studio outputs (briefing / FAQ / study guide), persisted per repo.
   | { target: 'offscreen-repo'; op: 'studioGet'; repo: string }
-  | { target: 'offscreen-repo'; op: 'studioSet'; repo: string; doc: StudioDoc };
+  | { target: 'offscreen-repo'; op: 'studioSet'; repo: string; doc: StudioDoc; expectedRevision: number };
 
 export interface RepoResponse {
   ok: boolean;

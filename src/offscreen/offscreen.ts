@@ -42,6 +42,7 @@ import {
   repoImportOne,
   repoDocChunks,
   repoGraphGet,
+  repoGraphSnapshot,
   repoGraphSet,
   repoList,
   repoNotebookGet,
@@ -388,6 +389,7 @@ async function handleRepo(req: RepoRequest): Promise<RepoResponse> {
             queryVectors: req.queryVectors,
             queries: req.queries,
             hybrid: req.hybrid,
+            graphAssist: req.graphAssist,
           }),
         };
       case 'list':
@@ -414,17 +416,19 @@ async function handleRepo(req: RepoRequest): Promise<RepoResponse> {
         return { ok: true };
       case 'notebookSample':
         return { ok: true, result: await repoNotebookSample(req.repo, req.maxChunks) };
+      case 'graphSnapshot':
+        return { ok: true, result: await repoGraphSnapshot(req.repo) };
       case 'graphGet':
         return { ok: true, result: await repoGraphGet(req.repo) };
       case 'graphSet':
-        await repoGraphSet(req.repo, req.graph);
+        await repoGraphSet(req.repo, req.graph, req.expectedRevision);
         return { ok: true };
       case 'docChunks':
         return { ok: true, result: await repoDocChunks(req.repo, req.docId) };
       case 'studioGet':
         return { ok: true, result: await repoStudioGet(req.repo) };
       case 'studioSet':
-        await repoStudioSet(req.repo, req.doc);
+        await repoStudioSet(req.repo, req.doc, req.expectedRevision);
         return { ok: true };
     }
   } catch (e) {
@@ -480,4 +484,3 @@ chrome.runtime.onMessage.addListener((message: EmbedLocalRequest, _sender, sendR
   })();
   return true; // async response
 });
-
