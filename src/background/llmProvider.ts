@@ -231,7 +231,9 @@ export async function complete(
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
-    throw new LlmError(`Model endpoint returned ${response.status}: ${text.slice(0, 500)}`);
+    const isHtml = response.headers.get('Content-Type')?.includes('text/html') || /^\s*<!doctype html/i.test(text);
+    const detail = isHtml ? 'The endpoint returned an HTML page instead of a model API response.' : text.slice(0, 500);
+    throw new LlmError(`Model endpoint ${url} returned ${response.status}: ${detail}`);
   }
 
   return adapter.parseResponse(await response.json());
@@ -246,7 +248,10 @@ export async function testConnection(settings: Settings): Promise<{ ok: boolean;
   try {
     // The probe should fail fast: no retries and a tiny deterministic completion,
     // since some local OpenAI-compatible servers default to very large outputs.
-    const message = await complete({ ...settings, retryOnRateLimit: false, temperature: 0, maxTokens: 8 }, [
+    // Reasoning-capable Gemini and Responses models need more than the legacy
+    // eight-token probe (Responses also enforces a minimum of 16).
+    const probeMaxTokens = settings.protocol === 'gemini-native' || settings.protocol === 'responses' ? 256 : 8;
+    const message = await complete({ ...settings, retryOnRateLimit: false, temperature: 0, maxTokens: probeMaxTokens }, [
       { role: 'user', content: 'Reply with the single word: ok' },
     ]);
     return { ok: true, detail: `Connected. Model replied: ${(message.content ?? '').slice(0, 100)}` };

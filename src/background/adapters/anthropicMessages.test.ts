@@ -15,11 +15,20 @@ describe('anthropicMessagesAdapter.buildRequest', () => {
     expect(req.url).toBe('https://api.anthropic.com/v1/messages');
     expect(req.headers['x-api-key']).toBe('sk-ant-test');
     expect(req.headers['anthropic-version']).toBe('2023-06-01');
+    expect(req.headers['anthropic-dangerous-direct-browser-access']).toBe('true');
     expect(req.headers.Authorization).toBeUndefined();
     expect(req.body).toMatchObject({
       system: 'be helpful',
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
     });
+  });
+
+  it('preserves a versioned OpenCode Zen base URL', () => {
+    const req = anthropicMessagesAdapter.buildRequest(
+      { ...settings, baseUrl: 'https://opencode.ai/zen/v1/', model: 'claude-sonnet-4-6' },
+      [{ role: 'user', content: 'hi' }],
+    );
+    expect(req.url).toBe('https://opencode.ai/zen/v1/messages');
   });
 
   it('defaults max_tokens when unset', () => {
@@ -30,6 +39,14 @@ describe('anthropicMessagesAdapter.buildRequest', () => {
   it('uses settings.maxTokens when set', () => {
     const req = anthropicMessagesAdapter.buildRequest({ ...settings, maxTokens: 500 }, [{ role: 'user', content: 'hi' }]);
     expect((req.body as { max_tokens: number }).max_tokens).toBe(500);
+  });
+
+  it('omits temperature for Claude deployments that reject it', () => {
+    const req = anthropicMessagesAdapter.buildRequest(
+      { ...settings, temperature: 0 },
+      [{ role: 'user', content: 'hi' }],
+    );
+    expect(req.body).not.toHaveProperty('temperature');
   });
 
   it('maps an assistant tool_call to a tool_use block and merges consecutive tool results into one user turn', () => {

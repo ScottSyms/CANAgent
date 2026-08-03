@@ -50,6 +50,14 @@ describe('openaiResponsesAdapter.buildRequest', () => {
     const input = (req.body as { input: Array<{ content: Array<{ type: string }> }> }).input;
     expect(input[0].content[0].type).toBe('input_image');
   });
+
+  it('omits temperature for reasoning models that reject it', () => {
+    const req = openaiResponsesAdapter.buildRequest(
+      { ...settings, temperature: 0 },
+      [{ role: 'user', content: 'hi' }],
+    );
+    expect(req.body).not.toHaveProperty('temperature');
+  });
 });
 
 describe('openaiResponsesAdapter.parseResponse', () => {

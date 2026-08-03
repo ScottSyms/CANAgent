@@ -68,7 +68,7 @@ export const openaiResponsesAdapter: ProtocolAdapter = {
       input: buildInput(messages),
     };
     if (tools && tools.length > 0) body.tools = toResponsesTools(tools);
-    if (settings.temperature !== undefined) body.temperature = settings.temperature;
+    // Reasoning-capable Responses models may reject `temperature`; it is optional.
     if (settings.maxTokens !== undefined) body.max_output_tokens = settings.maxTokens;
 
     const { base, key } = resolve(settings, 'chat');

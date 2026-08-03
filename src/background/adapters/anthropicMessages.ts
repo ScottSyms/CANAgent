@@ -42,6 +42,11 @@ function parseDataUrl(url: string): { mediaType: string; data: string } {
   return match ? { mediaType: match[1], data: match[2] } : { mediaType: 'image/jpeg', data: url };
 }
 
+function buildAnthropicUrl(base: string): string {
+  const versionedBase = /\/v1$/.test(base) ? base : `${base}/v1`;
+  return `${versionedBase}/messages`;
+}
+
 function toBlocks(content: ContentPart[]): AnthropicBlock[] {
   return content.map((p) => {
     if (p.type === 'text') return { type: 'text', text: p.text };
@@ -103,15 +108,17 @@ export const anthropicMessagesAdapter: ProtocolAdapter = {
     };
     if (system) body.system = system;
     if (tools && tools.length > 0) body.tools = toAnthropicTools(tools);
-    if (settings.temperature !== undefined) body.temperature = settings.temperature;
+    // Some Claude deployments enable thinking modes that reject `temperature`.
+    // It is optional in Messages requests, so provider defaults are the portable choice.
 
     const { base, key } = resolve(settings, 'chat');
     return {
-      url: `${base}/v1/messages`,
+      url: buildAnthropicUrl(base),
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': key,
         'anthropic-version': ANTHROPIC_VERSION,
+        'anthropic-dangerous-direct-browser-access': 'true',
       },
       body,
     };

@@ -98,6 +98,69 @@ describe('testConnection', () => {
     expect(result.ok).toBe(true);
     expect(requestBody).toMatchObject({ max_tokens: 8, temperature: 0 });
   });
+
+  it('reports the final request URL without dumping an HTML error page', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<!DOCTYPE html><html><body>Not found</body></html>', {
+        status: 404,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      })),
+    );
+
+    const result = await testConnection({
+      ...base,
+      baseUrl: 'https://opencode.ai/zen/v1',
+      model: 'gemini-3.6-flash',
+      protocol: 'gemini-native',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain('https://opencode.ai/zen/v1/models/gemini-3.6-flash:generateContent');
+    expect(result.detail).toContain('returned an HTML page');
+    expect(result.detail).not.toContain('<!DOCTYPE');
+  });
+
+  it('gives Gemini enough output budget to return text after internal reasoning', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }),
+    );
+
+    const result = await testConnection({ ...base, protocol: 'gemini-native', model: 'gemini-3.6-flash' });
+
+    expect(result.ok).toBe(true);
+    expect(requestBody).toMatchObject({ generationConfig: { maxOutputTokens: 256, temperature: 0 } });
+  });
+
+  it('meets the Responses API minimum output budget', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({
+          output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }],
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }),
+    );
+
+    const result = await testConnection({ ...base, protocol: 'responses', model: 'gpt-5.4-mini' });
+
+    expect(result.ok).toBe(true);
+    expect(requestBody).toMatchObject({ max_output_tokens: 256 });
+    expect(requestBody).not.toHaveProperty('temperature');
+  });
 });
 
 describe('complete (protocol dispatch)', () => {
@@ -131,7 +194,7 @@ describe('complete (protocol dispatch)', () => {
     );
     const anthropicSettings: Settings = { ...base, protocol: 'anthropic-messages' };
     const message = await complete(anthropicSettings, [{ role: 'user', content: 'hi' }]);
-    expect(requestUrl).toBe('https://api.example.com/v1/v1/messages');
+    expect(requestUrl).toBe('https://api.example.com/v1/messages');
     expect((headers as Record<string, string>)['x-api-key']).toBe('sk-test');
     expect(message).toEqual({ role: 'assistant', content: 'hi from claude' });
   });
@@ -147,7 +210,7 @@ describe('complete (protocol dispatch)', () => {
     );
     const geminiSettings: Settings = { ...base, protocol: 'gemini-native', model: 'gemini-3-flash' };
     const message = await complete(geminiSettings, [{ role: 'user', content: 'hi' }]);
-    expect(requestUrl).toBe('https://api.example.com/v1/v1beta/models/gemini-3-flash:generateContent');
+    expect(requestUrl).toBe('https://api.example.com/v1/models/gemini-3-flash:generateContent');
     expect(message).toEqual({ role: 'assistant', content: 'hi from gemini' });
   });
 

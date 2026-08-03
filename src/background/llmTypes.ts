@@ -10,6 +10,8 @@ export interface LlmToolCall {
   id: string;
   type: 'function';
   function: { name: string; arguments: string };
+  /** Opaque Gemini reasoning state that must accompany the function call on the next turn. */
+  thoughtSignature?: string;
 }
 
 export type ContentPart =

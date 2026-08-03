@@ -15,7 +15,7 @@ import type { AdapterRequest, ProtocolAdapter } from './types';
 //    `functionResponse` part on a `user` turn (keyed by function *name*, not a
 //    call id — Gemini has no call-id concept on the wire).
 //  - Auth via the `x-goog-api-key` header; the model id is baked into the URL
-//    path (`/v1beta/models/{model}:generateContent`), not the request body.
+//    path (`/{version}/models/{model}:generateContent`), not the request body.
 //  - Since our canonical `LlmToolCall.id` has no Gemini equivalent, this
 //    adapter invents one per response (`call_<index>_<name>`) and resolves it
 //    back to a function name by scanning the full message history for the
@@ -28,6 +28,7 @@ interface GeminiPart {
   inlineData?: { mimeType: string; data: string };
   functionCall?: { name: string; args: unknown };
   functionResponse?: { name: string; response: unknown };
+  thoughtSignature?: string;
 }
 
 interface GeminiContent {
@@ -38,6 +39,11 @@ interface GeminiContent {
 function parseDataUrl(url: string): { mimeType: string; data: string } {
   const match = /^data:([^;]+);base64,(.*)$/s.exec(url);
   return match ? { mimeType: match[1], data: match[2] } : { mimeType: 'image/jpeg', data: url };
+}
+
+function buildGeminiUrl(base: string, model: string): string {
+  const versionedBase = /\/v1(?:beta)?$/.test(base) ? base : `${base}/v1beta`;
+  return `${versionedBase}/models/${encodeURIComponent(model)}:generateContent`;
 }
 
 function toParts(content: ContentPart[]): GeminiPart[] {
@@ -90,7 +96,10 @@ function buildContents(messages: LlmMessage[]): { systemInstruction: GeminiConte
       } catch {
         args = {};
       }
-      parts.push({ functionCall: { name: tc.function.name, args } });
+      parts.push({
+        functionCall: { name: tc.function.name, args },
+        ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
+      });
     }
     if (parts.length > 0) contents.push({ role: m.role === 'assistant' ? 'model' : 'user', parts });
   }
@@ -114,7 +123,7 @@ export const geminiNativeAdapter: ProtocolAdapter = {
 
     const { base, key } = resolve(settings, 'chat');
     return {
-      url: `${base}/v1beta/models/${encodeURIComponent(settings.model)}:generateContent`,
+      url: buildGeminiUrl(base, settings.model),
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
       body,
     };
@@ -122,10 +131,36 @@ export const geminiNativeAdapter: ProtocolAdapter = {
 
   parseResponse(json: unknown): LlmResponseMessage {
     const data = json as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string; functionCall?: { name: string; args: unknown } }> } }>;
+      candidates?: Array<{
+        content?: {
+          parts?: Array<{
+            text?: string;
+            functionCall?: { name: string; args: unknown };
+            thoughtSignature?: string;
+          }>;
+        };
+        finishReason?: string;
+        finishMessage?: string;
+      }>;
+      promptFeedback?: { blockReason?: string; blockReasonMessage?: string };
     };
-    const parts = data.candidates?.[0]?.content?.parts;
-    if (!parts || parts.length === 0) throw new LlmError('Model endpoint returned no candidates.');
+    const candidate = data.candidates?.[0];
+    const parts = candidate?.content?.parts;
+    if (!parts || parts.length === 0) {
+      if (data.promptFeedback?.blockReason) {
+        const message = data.promptFeedback.blockReasonMessage ? `: ${data.promptFeedback.blockReasonMessage}` : '';
+        throw new LlmError(`Gemini blocked the prompt (${data.promptFeedback.blockReason})${message}`);
+      }
+      if (candidate?.finishReason === 'MAX_TOKENS') {
+        throw new LlmError('Gemini reached the maximum output token limit before returning visible content. Increase Max tokens and retry.');
+      }
+      if (candidate?.finishReason) {
+        const message = candidate.finishMessage ? `: ${candidate.finishMessage}` : '';
+        throw new LlmError(`Gemini returned no content (finish reason: ${candidate.finishReason})${message}`);
+      }
+      if (!candidate) throw new LlmError('Gemini returned no candidates.');
+      throw new LlmError('Gemini returned a candidate with no content.');
+    }
 
     let text = '';
     const toolCalls: LlmToolCall[] = [];
@@ -136,6 +171,7 @@ export const geminiNativeAdapter: ProtocolAdapter = {
           id: `call_${i}_${part.functionCall.name}`,
           type: 'function',
           function: { name: part.functionCall.name, arguments: JSON.stringify(part.functionCall.args ?? {}) },
+          ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
         });
       }
     });
