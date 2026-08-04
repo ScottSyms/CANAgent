@@ -140,5 +140,6 @@ export function buildUrl(base: string, path: string, version: string | undefined
  * tokens, which this extension does not issue.)
  */
 export function authHeaders(key: string, version: string | undefined): Record<string, string> {
+  if (!key) return {};
   return version ? { 'api-key': key } : { Authorization: `Bearer ${key}` };
 }

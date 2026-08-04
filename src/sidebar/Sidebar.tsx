@@ -167,7 +167,12 @@ export function Sidebar() {
   };
 
   const send = useCallback((command: SidebarCommand) => {
-    portRef.current?.postMessage(command);
+    if (portRef.current) {
+      portRef.current.postMessage(command);
+    } else if (command.type === 'stop_task') {
+      // Stop must remain effective during the brief service-worker reconnect gap.
+      void chrome.runtime.sendMessage(command);
+    }
   }, []);
 
   useEffect(() => {

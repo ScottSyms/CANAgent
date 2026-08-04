@@ -322,7 +322,9 @@ export function ModelProfilesSection() {
                   </td>
                   <td>
                     <select value={settings.roleProfiles?.[role] ?? ''} onChange={(e) => setRoleProfile(role, (e.target as HTMLSelectElement).value)}>
-                      <option value="">{t('modelProfiles.sameAsMain')}</option>
+                      <option value="">
+                        {t(role === 'knowledgeGraph' ? 'modelProfiles.sameAsUtility' : 'modelProfiles.sameAsMain')}
+                      </option>
                       {profiles.map((p) => (
                         <option key={p.id} value={p.id}>{p.name}{p.description ? ` — ${p.description}` : ''}</option>
                       ))}

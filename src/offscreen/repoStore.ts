@@ -87,6 +87,28 @@ interface ChunkRec {
   sentences?: CitableSentence[];
 }
 
+interface RepoSearchData {
+  revision: number;
+  chunkCount: number;
+  meta: RepoMeta;
+  vectors: Int8Array;
+  chunks: ReturnType<typeof enrichChunks>;
+  keywordIndex: KeywordIndex;
+}
+
+const SEARCH_DATA_CACHE_LIMIT = 3;
+const searchDataCache = new Map<string, RepoSearchData>();
+
+function cacheSearchData(repo: string, data: RepoSearchData): void {
+  searchDataCache.delete(repo);
+  searchDataCache.set(repo, data);
+  while (searchDataCache.size > SEARCH_DATA_CACHE_LIMIT) {
+    const oldest = searchDataCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    searchDataCache.delete(oldest);
+  }
+}
+
 /**
  * Attach sentence-level provenance to raw chunk records for retrieval. Derives
  * each chunk's stable `chunkId` (`${docId}:c${localChunkIdx}`) from the doc
@@ -293,6 +315,7 @@ export async function repoAdd(
   meta.corpusRevision = corpusRevision(meta) + 1;
   await writeJson(dir, 'meta.json', meta);
   await invalidateGraphArtifacts(dir);
+  searchDataCache.delete(repo);
   return { docId, chunkCount: meta.chunkCount };
 }
 
@@ -323,10 +346,19 @@ export async function repoSearch(
       `Repo "${repo}" was built with embedder "${meta.embedModel}" but the query used "${embedModel}". Re-index the repo (or switch the embedder back) to search it.`,
     );
   }
-  const vectors = await readVectors(dir);
-  const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
-  const keywordIndex = await readOrBuildKeywordIndex(dir, chunks);
-  const enrichedChunks = enrichChunks(meta, chunks);
+  const revision = corpusRevision(meta);
+  let cached = searchDataCache.get(repo);
+  if (!cached || cached.revision !== revision || cached.chunkCount !== meta.chunkCount) {
+    const vectors = await readVectors(dir);
+    const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
+    const keywordIndex = await readOrBuildKeywordIndex(dir, chunks);
+    cached = { revision, chunkCount: meta.chunkCount, meta, vectors, chunks: enrichChunks(meta, chunks), keywordIndex };
+    cacheSearchData(repo, cached);
+  } else {
+    // Refresh LRU order on use.
+    cacheSearchData(repo, cached);
+  }
+  const { vectors, chunks: enrichedChunks, keywordIndex } = cached;
   const base = {
     dim: meta.dim,
     perDimScale: meta.perDimScale,
@@ -403,6 +435,7 @@ export async function repoList(): Promise<
 export async function repoDelete(repo: string): Promise<void> {
   const dir = await reposDir();
   await dir.removeEntry(repo, { recursive: true });
+  searchDataCache.delete(repo);
 }
 
 // ----- backup / restore -----
@@ -479,6 +512,7 @@ export async function repoImportOne(repoData: ExportedRepo, targetName?: string)
   if (repoData.graph) await writeJson(d, 'graph.json', repoData.graph);
   if (repoData.studio) await writeJson(d, 'studio.json', repoData.studio);
 
+  searchDataCache.delete(name);
   return { ok: true, name };
 }
 
@@ -559,6 +593,7 @@ export async function repoDeleteDoc(repo: string, docId: string): Promise<{ remo
   meta.corpusRevision = corpusRevision(meta) + 1;
   await writeJson(dir, 'meta.json', meta);
   await invalidateGraphArtifacts(dir);
+  searchDataCache.delete(repo);
   return { removed: doc.chunkCount, chunkCount: meta.chunkCount };
 }
 

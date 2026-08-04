@@ -364,7 +364,7 @@ export interface Settings {
  * user-facing chat loop (plan/tool-use turns and the final answer) and is
  * never role-routed — it always uses the top-level Settings fields.
  */
-export type ModelRole = 'main' | 'utility' | 'reflection' | 'plan' | 'vision';
+export type ModelRole = 'main' | 'utility' | 'knowledgeGraph' | 'reflection' | 'plan' | 'vision';
 
 /**
  * The wire protocol a connection (top-level Settings or a ModelProfile)

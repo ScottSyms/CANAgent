@@ -972,8 +972,8 @@ project exists).
 `background/llmProvider.ts` `resolveModelForRole`): routes background/utility
 LLM calls to a different named endpoint than the main chat model, without
 touching `complete()` itself or its ~11 existing call sites' positional
-arguments. `ModelRole` is `'main' | 'utility' | 'reflection' | 'plan' |
-'vision'`; `'main'` (the user-facing chat loop and its final answer,
+arguments. `ModelRole` is `'main' | 'utility' | 'knowledgeGraph' |
+'reflection' | 'plan' | 'vision'`; `'main'` (the user-facing chat loop and its final answer,
 `agentRuntime.ts` lines ~1766/1973) is never routed. `Settings.modelProfiles`
 holds named alternate endpoints (baseUrl/apiKey/model/apiVersion/temperature/
 maxTokens/`privacyTier`); `Settings.roleProfiles` maps a role to a profile id.
@@ -987,6 +987,9 @@ role:
 - `'utility'` — conversation title/summary, self-check verify gate, skill
   distillation, old-tool-output compaction (`summarizeEvicted`), RAG query
   paraphrase and rerank.
+- `'knowledgeGraph'` — entity/relationship extraction and graph community
+  summaries. An unassigned role inherits `'utility'`, then the main model, so
+  existing Utility-routed graph builds retain their behavior.
 - `'reflection'` — lesson-learning (`maybeLearnLesson`), memory extraction
   (`reflectMemories`), the merge-vs-supersede adjudication call.
 - `'plan'` — scoped multi-step research subtasks (`runScopedSubtask`).

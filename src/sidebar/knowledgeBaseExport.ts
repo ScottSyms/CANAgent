@@ -230,6 +230,7 @@ function renderGraphSvgMap(graph: DocGraph): string {
   return (
     `<div class="kb-graph-map-container">` +
     `<div class="kb-graph-map-title">Concept Map</div>` +
+    `<p class="kb-note">Showing ${nodes.length} of ${graph.nodes.length} entities, ranked by connectivity. The complete entity inventory appears below.</p>` +
     `<svg viewBox="0 0 ${SVG_SIZE} ${SVG_SIZE}" class="kb-graph-svg">` +
     `${lineSvg}\n${nodeSvg}` +
     `</svg>` +

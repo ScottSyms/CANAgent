@@ -46,6 +46,19 @@ export interface CommunitySummary {
   evidenceSentenceIds: string[];
 }
 
+export type GraphCoverageMode = 'quick' | 'full';
+
+export interface GraphDocCoverage {
+  /** Number of extraction windows in the complete document. */
+  totalWindows: number;
+  /** Window indices selected by the most recent quick/full build. */
+  selectedWindows: number[];
+  /** Successfully extracted window indices, checkpointed individually. */
+  completedWindows: number[];
+  /** Failed window indices; retried by later builds. */
+  failedWindows: number[];
+}
+
 export interface DocGraph {
   nodes: GraphNode[];
   edges: GraphEdge[];
@@ -67,12 +80,14 @@ export interface DocGraph {
   docErrors?: Record<string, string>;
   /** Corpus-level topic communities + summaries (computed after extraction). */
   communities?: CommunitySummary[];
+  /** Per-document extraction coverage. Absent on legacy graphs. */
+  docCoverage?: Record<string, GraphDocCoverage>;
+  /** Highest coverage mode completed or currently being built. */
+  coverageMode?: GraphCoverageMode;
   updatedAt: string;
 }
 
-export const DOC_GRAPH_VERSION = 1;
-export const MAX_GRAPH_NODES = 600;
-export const MAX_GRAPH_EDGES = 1200;
+export const DOC_GRAPH_VERSION = 2;
 const MAX_EVIDENCE_PER_ITEM = 12;
 
 export function emptyDocGraph(): DocGraph {
@@ -95,6 +110,7 @@ export function markDocProcessed(graph: DocGraph, docId: string): void {
  * OUT of processedDocIds so it is retried on the next non-rebuild build. Dedupes.
  */
 export function markDocFailed(graph: DocGraph, docId: string, reason: string): void {
+  graph.processedDocIds = graph.processedDocIds.filter((id) => id !== docId);
   if (!graph.failedDocIds) graph.failedDocIds = [];
   if (!graph.failedDocIds.includes(docId)) graph.failedDocIds.push(docId);
   if (!graph.docErrors) graph.docErrors = {};
@@ -166,7 +182,7 @@ export function coerceExtraction(obj: unknown, validIds: Set<string>): DocExtrac
           summary: typeof e.summary === 'string' ? e.summary.trim() : '',
           evidence: keepIds(strArr(e.evidence)),
         }))
-        .filter((e) => e.label)
+        .filter((e) => e.label && e.evidence.length > 0)
     : [];
 
   const relations: ExtractedRelation[] = Array.isArray(o.relations)
@@ -178,7 +194,7 @@ export function coerceExtraction(obj: unknown, validIds: Set<string>): DocExtrac
           relation: typeof r.relation === 'string' ? r.relation.trim() : '',
           evidence: keepIds(strArr(r.evidence)),
         }))
-        .filter((r) => r.from && r.to && r.relation)
+        .filter((r) => r.from && r.to && r.relation && r.evidence.length > 0)
     : [];
 
   return { entities, relations };
@@ -200,7 +216,12 @@ function indexByLabel(graph: DocGraph): Map<string, GraphNode> {
  * missing ones) and merge by (from, relation, to). Evidence sentence ids are
  * unioned. Records the doc as processed. Deterministic given the same inputs.
  */
-export function mergeExtraction(graph: DocGraph, extraction: DocExtraction, docId: string): DocGraph {
+export function mergeExtraction(
+  graph: DocGraph,
+  extraction: DocExtraction,
+  docId: string,
+  opts: { markProcessed?: boolean } = {},
+): DocGraph {
   const idx = indexByLabel(graph);
 
   const resolveOrCreate = (label: string, type: string, summary: string): GraphNode => {
@@ -222,7 +243,9 @@ export function mergeExtraction(graph: DocGraph, extraction: DocExtraction, docI
 
   for (const e of extraction.entities) {
     const node = resolveOrCreate(e.label, e.type, e.summary);
-    if (!node.summary && e.summary) node.summary = e.summary;
+    // Prefer the richer description rather than permanently preserving whichever
+    // document happened to be ingested first.
+    if (e.summary.length > node.summary.length) node.summary = e.summary;
     if (normLabel(e.label) !== normLabel(node.label)) uniqPush(node.aliases, [e.label], 20);
     uniqPush(node.evidenceSentenceIds, e.evidence, 50);
     uniqPush(node.docIds, [docId], 200);
@@ -242,10 +265,7 @@ export function mergeExtraction(graph: DocGraph, extraction: DocExtraction, docI
     uniqPush(edge.evidenceSentenceIds, r.evidence, 50);
   }
 
-  if (!graph.processedDocIds.includes(docId)) graph.processedDocIds.push(docId);
-  graph.nodes = graph.nodes.slice(0, MAX_GRAPH_NODES);
-  const nodeIds = new Set(graph.nodes.map((n) => n.id));
-  graph.edges = graph.edges.filter((e) => nodeIds.has(e.from) && nodeIds.has(e.to)).slice(0, MAX_GRAPH_EDGES);
+  if (opts.markProcessed !== false && !graph.processedDocIds.includes(docId)) graph.processedDocIds.push(docId);
   graph.updatedAt = new Date().toISOString();
   return graph;
 }

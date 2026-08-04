@@ -77,6 +77,7 @@ export function GraphPanel({ repo }: { repo: string }) {
   const [detail, setDetail] = useState<{ title: string; summary: string; color?: string } | null>(null);
   const [evidence, setEvidence] = useState<Citation[]>([]);
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
+  const [entityQuery, setEntityQuery] = useState('');
   const pollRef = useRef<number | null>(null);
 
   const refresh = async () => {
@@ -99,14 +100,14 @@ export function GraphPanel({ repo }: { repo: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo]);
 
-  const build = async (rebuild: boolean) => {
+  const build = async (mode: 'quick' | 'full', rebuild = false) => {
     setError(null);
     setWarnings([]);
     setBuilding(true);
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(() => void refresh(), 2000) as unknown as number;
     try {
-      const res = (await chrome.runtime.sendMessage({ type: 'notebook_graph_build', repo, rebuild })) as BuildResponse;
+      const res = (await chrome.runtime.sendMessage({ type: 'notebook_graph_build', repo, rebuild, mode })) as BuildResponse;
       if (res?.ok && res.graph) setGraph(res.graph);
       if (res?.ok) setWarnings(res.warnings ?? []);
       else if (res && !res.ok) setError(res.error ?? 'Graph build failed.');
@@ -117,6 +118,13 @@ export function GraphPanel({ repo }: { repo: string }) {
     pollRef.current = null;
     setBuilding(false);
     void refresh();
+  };
+
+  const cancelBuild = async () => {
+    await chrome.runtime.sendMessage({ type: 'notebook_graph_cancel', repo });
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = null;
+    setBuilding(false);
   };
 
   const showEvidence = async (title: string, summary: string, ids: string[], color?: string) => {
@@ -147,8 +155,18 @@ export function GraphPanel({ repo }: { repo: string }) {
   const nodeCount = graph?.nodes.length ?? 0;
   const edgeCount = graph?.edges.length ?? 0;
   const communities = graph?.communities ?? [];
+  const coverage = Object.values(graph?.docCoverage ?? {});
+  const selectedWindows = coverage.reduce((sum, item) => sum + item.selectedWindows.length, 0);
+  const completedWindows = coverage.reduce(
+    (sum, item) => sum + item.selectedWindows.filter((index) => item.completedWindows.includes(index)).length,
+    0,
+  );
+  const totalWindows = coverage.reduce((sum, item) => sum + item.totalWindows, 0);
   const view = graph ? layout(graph) : null;
   const comIdx = graph ? communityIndex(graph) : new Map<string, number>();
+  const matchingNodes = graph
+    ? graph.nodes.filter((node) => `${node.label} ${node.type} ${node.summary}`.toLowerCase().includes(entityQuery.trim().toLowerCase()))
+    : [];
 
   return (
     <div class="graph-panel" style={{ margin: '6px 0 10px', padding: '10px', border, borderRadius: '8px' }}>
@@ -159,12 +177,21 @@ export function GraphPanel({ repo }: { repo: string }) {
           Knowledge graph
         </strong>
         <div style={{ display: 'flex', gap: '6px' }}>
-          <button class="btn btn-small" disabled={building} onClick={() => void build(false)}>
-            {building ? 'Building…' : nodeCount > 0 ? 'Update' : 'Build graph'}
-          </button>
+          {building ? (
+            <button class="btn btn-small" onClick={() => void cancelBuild()}>Stop build</button>
+          ) : (
+            <>
+              <button class="btn btn-small" onClick={() => void build('quick')}>
+                {nodeCount > 0 ? 'Quick update' : 'Quick build'}
+              </button>
+              <button class="btn btn-small" onClick={() => void build('full')} title="Process every document window; resumable but may use many model calls">
+                Full coverage
+              </button>
+            </>
+          )}
           {(nodeCount > 0 || failedIds.length > 0) && !building && (
-            <button class="btn btn-small" onClick={() => void build(true)} title="Discard and re-extract from scratch">
-              Rebuild
+            <button class="btn btn-small" onClick={() => void build('full', true)} title="Discard and fully re-extract from scratch">
+              Full rebuild
             </button>
           )}
         </div>
@@ -178,7 +205,9 @@ export function GraphPanel({ repo }: { repo: string }) {
 
       {building && (
         <p class="settings-note">
-          Extracting… {processed} / {docCount} documents · {nodeCount} entities, {edgeCount} relationships
+          Extracting… {processed} / {docCount} documents
+          {selectedWindows > 0 ? ` · ${completedWindows}/${selectedWindows} selected windows` : ''}
+          {' · '}{nodeCount} entities, {edgeCount} relationships
         </p>
       )}
 
@@ -215,7 +244,10 @@ export function GraphPanel({ repo }: { repo: string }) {
           <p class="settings-note" style={{ marginTop: '6px' }}>
             {nodeCount} entities · {edgeCount} relationships · {communities.length} themes
             {processed < docCount ? ` · ${processed}/${docCount} docs processed` : ''}
+            {graph?.coverageMode ? ` · ${graph.coverageMode} coverage` : ' · legacy coverage'}
+            {totalWindows > selectedWindows ? ` · ${selectedWindows}/${totalWindows} windows selected` : ''}
           </p>
+          <p class="settings-note">Concept map shows {Math.min(MAP_NODES, nodeCount)} of {nodeCount} entities, ranked by connectivity.</p>
           <svg
             viewBox={`0 0 ${SIZE} ${SIZE}`}
             style={{ width: '100%', maxWidth: `${SIZE}px`, height: 'auto', display: 'block', margin: '4px auto' }}
@@ -241,6 +273,34 @@ export function GraphPanel({ repo }: { repo: string }) {
               );
             })}
           </svg>
+
+          <details style={{ marginTop: '6px' }}>
+            <summary class="settings-note" style={{ cursor: 'pointer' }}>Browse all {nodeCount} entities</summary>
+            <input
+              class="input"
+              type="search"
+              value={entityQuery}
+              placeholder="Filter entities"
+              onInput={(event) => setEntityQuery((event.currentTarget as HTMLInputElement).value)}
+              style={{ width: '100%', margin: '6px 0' }}
+            />
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+              {matchingNodes.slice(0, 100).map((node) => {
+                const ci = comIdx.get(node.id);
+                return (
+                  <button
+                    key={node.id}
+                    class="btn btn-small"
+                    style={{ borderLeft: `3px solid ${colorForIndex(ci)}` }}
+                    onClick={() => selectNode(node, ci)}
+                  >
+                    {node.label}
+                  </button>
+                );
+              })}
+            </div>
+            {matchingNodes.length > 100 && <p class="settings-note">Showing 100 matches. Refine the filter to narrow the list.</p>}
+          </details>
 
           {communities.length > 0 && (
             <div style={{ marginTop: '8px' }}>

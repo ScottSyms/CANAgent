@@ -5,6 +5,23 @@
 // background then summarizes into per-cluster themes (grounded to sentence ids).
 
 import type { CommunitySummary, DocGraph, GraphEdge, GraphNode } from './docGraph';
+import { tokenize } from './keywordSearch';
+
+const GLOBAL_QUERY_TERMS = new Set([
+  'a', 'all', 'an', 'and', 'are', 'collection', 'corpus', 'fit', 'for', 'how',
+  'in', 'it', 'main', 'notebook', 'of', 'or', 'overview', 'repository', 'summarize',
+  'summary', 'the', 'theme', 'themes', 'to', 'together', 'what', 'whole', 'with',
+]);
+
+function relevantTerms(text: string): Set<string> {
+  return new Set(tokenize(text).filter((term) => !GLOBAL_QUERY_TERMS.has(term)));
+}
+
+function overlap(query: Set<string>, text: string): number {
+  let score = 0;
+  for (const term of new Set(tokenize(text))) if (query.has(term)) score++;
+  return score;
+}
 
 /** A raw (unsummarized) community: an id and its member node ids. */
 export interface RawCommunity {
@@ -110,6 +127,43 @@ export function renderCommunitiesForModel(communities: CommunitySummary[]): stri
   return communities
     .map((c) => `## ${c.title}\n${c.summary} ${tag(c.evidenceSentenceIds)}`.trim())
     .join('\n\n');
+}
+
+/**
+ * Rank summarized communities for a corpus-level query. Generic requests such
+ * as "main themes" intentionally preserve the graph's original ordering; a
+ * specific query returns only communities with lexical support in the theme,
+ * its member entities, or their internal relationships.
+ */
+export function rankCommunities(graph: DocGraph, query: string, limit = 5): CommunitySummary[] {
+  const communities = graph.communities ?? [];
+  const cappedLimit = Math.max(1, Math.min(limit, 12));
+  const queryTerms = relevantTerms(query);
+  if (queryTerms.size === 0) return communities.slice(0, cappedLimit);
+
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const scored = communities.map((community, index) => {
+    let score = overlap(queryTerms, community.title) * 4 + overlap(queryTerms, community.summary);
+    const members = new Set(community.nodeIds);
+    for (const id of members) {
+      const node = nodesById.get(id);
+      if (!node) continue;
+      score += overlap(queryTerms, node.label) * 3;
+      score += overlap(queryTerms, node.aliases.join(' ')) * 2;
+      score += overlap(queryTerms, node.summary);
+      score += overlap(queryTerms, node.type);
+    }
+    for (const edge of graph.edges) {
+      if (members.has(edge.from) && members.has(edge.to)) score += overlap(queryTerms, edge.relation) * 2;
+    }
+    return { community, index, score };
+  });
+
+  return scored
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, cappedLimit)
+    .map(({ community }) => community);
 }
 
 /** Convenience: the node objects belonging to a raw community. */

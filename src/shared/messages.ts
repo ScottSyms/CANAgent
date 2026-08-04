@@ -119,6 +119,7 @@ export type BackgroundEvent =
 
 /** One-shot messages handled by chrome.runtime.onMessage. */
 export type RuntimeRequest =
+  | { type: 'stop_task' }
   | { type: 'test_connection'; settings: Settings }
   | { type: 'repo_list' }
   | { type: 'job_control'; action: 'pause' | 'resume' | 'cancel' | 'delete'; id: string }
@@ -137,7 +138,8 @@ export type RuntimeRequest =
   // Document knowledge graph: read the extracted graph (+ progress), or build/
   // resume/rebuild it from the repo's documents.
   | { type: 'notebook_graph_get'; repo: string }
-  | { type: 'notebook_graph_build'; repo: string; rebuild?: boolean }
+  | { type: 'notebook_graph_build'; repo: string; rebuild?: boolean; mode?: 'quick' | 'full' }
+  | { type: 'notebook_graph_cancel'; repo: string }
   // Resolve a graph node/edge's evidence sentence ids to full citations (source
   // doc + exact sentence text) for the graph UI's evidence panel.
   | { type: 'notebook_graph_evidence'; repo: string; sentenceIds: string[] }

@@ -74,6 +74,10 @@ describe('authHeaders', () => {
     expect(authHeaders('sk-test', undefined)).toEqual({ Authorization: 'Bearer sk-test' });
   });
 
+  it('omits authentication for local endpoints that do not require a key', () => {
+    expect(authHeaders('', undefined)).toEqual({});
+  });
+
   it('uses the api-key header in Azure mode', () => {
     expect(authHeaders('sk-test', '2024-02-01')).toEqual({ 'api-key': 'sk-test' });
   });
@@ -230,6 +234,53 @@ describe('complete (protocol dispatch)', () => {
     expect(requestUrl).toBe('https://api.example.com/v1/responses');
     expect(message).toEqual({ role: 'assistant', content: 'hi from gpt-5' });
   });
+
+  it('retries one transient HTTP-200 provider failure before returning content', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{
+          finish_reason: 'error',
+          message: { role: 'assistant', content: null },
+          error: { code: 502, message: 'Provider unavailable', metadata: { error_type: 'provider_unavailable' } },
+        }],
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'recovered' } }],
+      }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(complete(base, [{ role: 'user', content: 'hi' }])).resolves.toMatchObject({ content: 'recovered' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('surfaces the provider error after one unsuccessful parsed retry', async () => {
+    const response = () => new Response(JSON.stringify({
+      choices: [{
+        finish_reason: 'error',
+        message: { role: 'assistant', content: null },
+        error: {
+          code: 502,
+          message: 'Gemini upstream returned no output',
+          metadata: { error_type: 'provider_unavailable' },
+        },
+      }],
+    }), { status: 200 });
+    const fetchMock = vi.fn().mockImplementation(response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(complete(base, [{ role: 'user', content: 'hi' }])).rejects.toThrow('Gemini upstream returned no output');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry a length-limited empty response', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ finish_reason: 'length', message: { role: 'assistant', content: null } }],
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(complete(base, [{ role: 'user', content: 'hi' }])).rejects.toThrow('Increase Max tokens');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('resolveModelForRole', () => {
@@ -302,6 +353,43 @@ describe('resolveModelForRole', () => {
   it('without restrictBackgroundToLocal, a cloud-tagged profile is used normally', () => {
     const settings: Settings = { ...base, modelProfiles: [cloudProfile], roleProfiles: { reflection: 'p2' } };
     expect(resolveModelForRole(settings, 'reflection').model).toBe(cloudProfile.model);
+  });
+
+  it('uses an explicitly assigned Knowledge Graph profile', () => {
+    const settings: Settings = {
+      ...base,
+      modelProfiles: [localProfile, cloudProfile],
+      roleProfiles: { utility: 'p1', knowledgeGraph: 'p2' },
+    };
+    expect(resolveModelForRole(settings, 'knowledgeGraph').model).toBe(cloudProfile.model);
+  });
+
+  it('inherits Utility when Knowledge Graph is unassigned', () => {
+    const settings: Settings = { ...base, modelProfiles: [localProfile], roleProfiles: { utility: 'p1' } };
+    expect(resolveModelForRole(settings, 'knowledgeGraph').model).toBe(localProfile.model);
+  });
+
+  it('falls back to main when neither Knowledge Graph nor Utility is assigned', () => {
+    expect(resolveModelForRole(base, 'knowledgeGraph')).toBe(base);
+  });
+
+  it('does not silently inherit Utility when an explicit Knowledge Graph mapping is invalid', () => {
+    const settings: Settings = {
+      ...base,
+      modelProfiles: [localProfile],
+      roleProfiles: { utility: 'p1', knowledgeGraph: 'missing' },
+    };
+    expect(resolveModelForRole(settings, 'knowledgeGraph')).toBe(settings);
+  });
+
+  it('does not silently inherit Utility when an explicit Knowledge Graph profile is privacy-gated', () => {
+    const settings: Settings = {
+      ...base,
+      restrictBackgroundToLocal: true,
+      modelProfiles: [localProfile, cloudProfile],
+      roleProfiles: { utility: 'p1', knowledgeGraph: 'p2' },
+    };
+    expect(resolveModelForRole(settings, 'knowledgeGraph')).toBe(settings);
   });
 });
 

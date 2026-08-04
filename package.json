@@ -9,6 +9,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "benchmark:retrieval": "node scripts/retrieval-benchmark.ts",
     "test:e2e": "npm run build && playwright test",
     "test:e2e:headed": "npm run build && playwright test --headed",
     "test:e2e:debug": "npm run build && PWDEBUG=1 playwright test",

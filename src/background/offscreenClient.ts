@@ -32,6 +32,44 @@ import type { DocGraph } from '../shared/docGraph';
 // runs in an offscreen document created on demand.
 
 let creating: Promise<void> | null = null;
+const OFFSCREEN_TIMEOUT_MS = 120_000;
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+}
+
+/** Bound extension-message waits and let Stop release the caller immediately. */
+function waitForOffscreen<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortReason(signal));
+      return;
+    }
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new DOMException('The repository engine did not respond in time.', 'TimeoutError'));
+    }, OFFSCREEN_TIMEOUT_MS);
+    const onAbort = () => {
+      cleanup();
+      reject(abortReason(signal as AbortSignal));
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
 
 async function hasOffscreen(): Promise<boolean> {
   if (!chrome.runtime.getContexts) return false;
@@ -101,14 +139,15 @@ export async function generatePresentation(
  * the offscreen doc is probably crashed or was killed by Chrome, so we force-
  * recreate it and retry once more rather than giving up.
  */
-async function sendOffscreen<T>(request: unknown): Promise<T | { ok: false; error: string }> {
+async function sendOffscreen<T>(request: unknown, signal?: AbortSignal): Promise<T | { ok: false; error: string }> {
   const doSend = async (): Promise<T | { ok: false; error: string }> => {
     for (let attempt = 0; ; attempt++) {
       try {
-        return (await chrome.runtime.sendMessage(request)) as T;
+        return await waitForOffscreen(chrome.runtime.sendMessage(request) as Promise<T>, signal);
       } catch (e) {
+        if (signal?.aborted) throw abortReason(signal);
         if (attempt < 15 && /Receiving end does not exist|establish connection/i.test(String(e))) {
-          await new Promise((r) => setTimeout(r, 100));
+          await waitForOffscreen(new Promise((r) => setTimeout(r, 100)), signal);
           continue;
         }
         return { ok: false, error: String(e) };
@@ -141,14 +180,15 @@ async function closeAndRecreate(): Promise<void> {
 }
 
 /** Embed text on-device with the offscreen transformers.js model (local RAG). */
-export async function embedLocal(texts: string[], model?: string): Promise<EmbedLocalResponse> {
+export async function embedLocal(texts: string[], model?: string, signal?: AbortSignal): Promise<EmbedLocalResponse> {
   try {
-    await ensureOffscreen();
+    await waitForOffscreen(ensureOffscreen(), signal);
   } catch (e) {
+    if (signal?.aborted) throw abortReason(signal);
     return { ok: false, error: `Could not start the local embedder: ${String(e)}` };
   }
   const request: EmbedLocalRequest = { target: 'offscreen', type: 'embed_local', texts, model };
-  return sendOffscreen<EmbedLocalResponse>(request);
+  return sendOffscreen<EmbedLocalResponse>(request, signal);
 }
 
 export async function extractOffice(url: string, maxChars?: number): Promise<ExtractOfficeResponse> {
@@ -161,13 +201,14 @@ export async function extractOffice(url: string, maxChars?: number): Promise<Ext
   return sendOffscreen<ExtractOfficeResponse>(request);
 }
 
-async function repoRequest(req: RepoRequest): Promise<RepoResponse> {
+async function repoRequest(req: RepoRequest, signal?: AbortSignal): Promise<RepoResponse> {
   try {
-    await ensureOffscreen();
+    await waitForOffscreen(ensureOffscreen(), signal);
   } catch (e) {
+    if (signal?.aborted) throw abortReason(signal);
     return { ok: false, error: `Could not start the repository engine: ${String(e)}` };
   }
-  return sendOffscreen<RepoResponse>(req);
+  return sendOffscreen<RepoResponse>(req, signal);
 }
 
 export function repoAdd(
@@ -185,7 +226,7 @@ export function repoSearch(
   queryVector: number[],
   k: number,
   embedModel?: string,
-  opts: { query?: string; hybrid?: boolean; graphAssist?: boolean; queryVectors?: number[][]; queries?: string[] } = {},
+  opts: { query?: string; hybrid?: boolean; graphAssist?: boolean; queryVectors?: number[][]; queries?: string[]; signal?: AbortSignal } = {},
 ): Promise<RepoResponse> {
   return repoRequest({
     target: 'offscreen-repo',
@@ -199,7 +240,7 @@ export function repoSearch(
     queries: opts.queries,
     hybrid: opts.hybrid,
     graphAssist: opts.graphAssist,
-  });
+  }, opts.signal);
 }
 
 export function repoList(): Promise<RepoResponse> {
@@ -258,8 +299,8 @@ export function graphSet(repo: string, graph: DocGraph, expectedRevision: number
   return repoRequest({ target: 'offscreen-repo', op: 'graphSet', repo, graph, expectedRevision });
 }
 
-export function docChunks(repo: string, docId: string): Promise<RepoResponse> {
-  return repoRequest({ target: 'offscreen-repo', op: 'docChunks', repo, docId });
+export function docChunks(repo: string, docId: string, signal?: AbortSignal): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'docChunks', repo, docId }, signal);
 }
 
 export function studioGet(repo: string): Promise<RepoResponse> {

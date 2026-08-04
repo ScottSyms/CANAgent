@@ -67,7 +67,9 @@ export function messagesContainImage(msgs: LlmMessage[]): boolean {
 export function resolveModelForRole(settings: Settings, role: ModelRole): Settings {
   if (role === 'main') return settings;
   const profileId = settings.roleProfiles?.[role];
-  if (!profileId) return settings;
+  // Graph work historically used Utility. Preserve that routing unless the user
+  // explicitly assigns the dedicated Knowledge Graph role.
+  if (!profileId) return role === 'knowledgeGraph' ? resolveModelForRole(settings, 'utility') : settings;
   const profile = settings.modelProfiles?.find((p) => p.id === profileId);
   if (!profile) return settings;
   if (settings.restrictBackgroundToLocal && profile.privacyTier !== 'local') return settings;
@@ -105,7 +107,8 @@ export function embedderId(settings: Settings): string {
 export async function embedChunks(settings: Settings, texts: string[], signal?: AbortSignal): Promise<number[][]> {
   if (texts.length === 0) return [];
   if (settings.embedder === 'external') return embed(settings, texts, signal);
-  const res = await embedLocal(texts, settings.localEmbedModel || DEFAULT_LOCAL_EMBED_MODEL);
+  const model = settings.localEmbedModel || DEFAULT_LOCAL_EMBED_MODEL;
+  const res = signal ? await embedLocal(texts, model, signal) : await embedLocal(texts, model);
   if (!res.ok || !res.vectors) {
     throw new LlmError(`Local embedder failed: ${res.error ?? 'no vectors returned'}`);
   }
@@ -207,36 +210,51 @@ export async function complete(
   const adapter = getAdapter(settings.protocol);
   const { url, headers, body } = adapter.buildRequest(settings, messages, tools);
 
-  let response: Response;
-  try {
-    response = await requestWithRetry(
-      (attemptSignal) =>
-        fetch(url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          signal: attemptSignal,
-        }),
-      { enabled: settings.retryOnRateLimit ?? true, signal, onRetry },
-    );
-  } catch (err) {
-    if (err instanceof DOMException && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+  // OpenRouter and other compatible gateways can report transient provider
+  // failures inside an HTTP-200 response. Retry one such parsed failure; no
+  // tool has executed yet, so replaying this completion is safe.
+  for (let parsedAttempt = 0; parsedAttempt < 2; parsedAttempt++) {
+    let response: Response;
+    try {
+      response = await requestWithRetry(
+        (attemptSignal) =>
+          fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            signal: attemptSignal,
+          }),
+        { enabled: settings.retryOnRateLimit ?? true, signal, onRetry },
+      );
+    } catch (err) {
+      if (err instanceof DOMException && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+        throw err;
+      }
+      throw new LlmError(
+        `Could not reach the model endpoint (${settings.baseUrl}). ` +
+          `If the endpoint blocks cross-origin requests, re-save settings to grant the extension access to it. (${String(err)})`,
+      );
+    }
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      const isHtml = response.headers.get('Content-Type')?.includes('text/html') || /^\s*<!doctype html/i.test(text);
+      const detail = isHtml ? 'The endpoint returned an HTML page instead of a model API response.' : text.slice(0, 500);
+      throw new LlmError(`Model endpoint ${url} returned ${response.status}: ${detail}`);
+    }
+
+    try {
+      const message = adapter.parseResponse(await response.json());
+      if (!message.content?.trim() && (!message.tool_calls || message.tool_calls.length === 0)) {
+        throw new LlmError('Model provider returned no usable text or tool call.', { retryable: true });
+      }
+      return message;
+    } catch (err) {
+      if (err instanceof LlmError && err.retryable && parsedAttempt === 0 && (settings.retryOnRateLimit ?? true)) continue;
       throw err;
     }
-    throw new LlmError(
-      `Could not reach the model endpoint (${settings.baseUrl}). ` +
-        `If the endpoint blocks cross-origin requests, re-save settings to grant the extension access to it. (${String(err)})`,
-    );
   }
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    const isHtml = response.headers.get('Content-Type')?.includes('text/html') || /^\s*<!doctype html/i.test(text);
-    const detail = isHtml ? 'The endpoint returned an HTML page instead of a model API response.' : text.slice(0, 500);
-    throw new LlmError(`Model endpoint ${url} returned ${response.status}: ${detail}`);
-  }
-
-  return adapter.parseResponse(await response.json());
+  throw new LlmError('Model provider returned no usable response after retrying.');
 }
 
 /**

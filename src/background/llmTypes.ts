@@ -40,4 +40,12 @@ export interface LlmResponseMessage {
   tool_calls?: LlmToolCall[];
 }
 
-export class LlmError extends Error {}
+export class LlmError extends Error {
+  readonly retryable: boolean;
+
+  constructor(message: string, options?: { retryable?: boolean }) {
+    super(message);
+    this.name = 'LlmError';
+    this.retryable = options?.retryable ?? false;
+  }
+}

@@ -36,6 +36,14 @@ describe('coerceExtraction', () => {
     expect(coerceExtraction(null, ids())).toEqual({ entities: [], relations: [] });
     expect(coerceExtraction({ entities: 'x' }, ids())).toEqual({ entities: [], relations: [] });
   });
+
+  it('drops entities and relations that have no valid source evidence', () => {
+    const out = coerceExtraction({
+      entities: [{ label: 'Unsupported', type: 'x', summary: 'claim', evidence: ['fabricated'] }],
+      relations: [{ from: 'A', to: 'B', relation: 'claims', evidence: [] }],
+    }, ids('real'));
+    expect(out).toEqual({ entities: [], relations: [] });
+  });
 });
 
 describe('mergeExtraction', () => {
@@ -64,6 +72,32 @@ describe('mergeExtraction', () => {
     expect(g.nodes.map((n) => n.label).sort()).toEqual(['Azure', 'SSC']);
     expect(g.edges).toHaveLength(1);
     expect(g.edges[0].evidenceSentenceIds).toEqual(['s1', 's2']);
+  });
+
+  it('does not silently discard entities after the former storage ceiling', () => {
+    const g = emptyDocGraph();
+    mergeExtraction(g, {
+      entities: Array.from({ length: 650 }, (_, i) => ({
+        label: `Entity ${i}`,
+        type: 'item',
+        summary: `Summary ${i}`,
+        evidence: [`s${i}`],
+      })),
+      relations: [],
+    }, 'doc-1');
+
+    expect(g.nodes).toHaveLength(650);
+    expect(g.nodes.at(-1)?.label).toBe('Entity 649');
+  });
+
+  it('keeps a richer later summary instead of the first summary', () => {
+    const g = emptyDocGraph();
+    mergeExtraction(g, { entities: [{ label: 'Shared', type: 'x', summary: 'Short.', evidence: ['s1'] }], relations: [] }, 'd1');
+    mergeExtraction(g, {
+      entities: [{ label: 'Shared', type: 'x', summary: 'A more complete description from another source.', evidence: ['s2'] }],
+      relations: [],
+    }, 'd2');
+    expect(g.nodes[0].summary).toBe('A more complete description from another source.');
   });
 });
 
@@ -124,5 +158,13 @@ describe('markDocProcessed / markDocFailed', () => {
     expect(g.processedDocIds).toEqual(['doc-1']);
     expect(g.failedDocIds).toEqual([]);
     expect(g.docErrors).toEqual({});
+  });
+
+  it('a later failure removes a previously processed document', () => {
+    const g = emptyDocGraph();
+    markDocProcessed(g, 'doc-1');
+    markDocFailed(g, 'doc-1', 'window failed');
+    expect(g.processedDocIds).toEqual([]);
+    expect(g.failedDocIds).toEqual(['doc-1']);
   });
 });

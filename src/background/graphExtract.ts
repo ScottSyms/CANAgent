@@ -15,12 +15,15 @@ import { complete, resolveModelForRole } from './llmProvider';
 import { extractJsonObject } from './scopedSubtask';
 import {
   coerceExtraction,
+  DOC_GRAPH_VERSION,
   emptyDocGraph,
   markDocFailed,
   markDocProcessed,
   mergeExtraction,
   type CommunitySummary,
   type DocExtraction,
+  type GraphCoverageMode,
+  type GraphDocCoverage,
   type DocGraph,
 } from '../shared/docGraph';
 import { detectCommunities, renderCommunityForModel } from '../shared/graphCommunities';
@@ -34,6 +37,16 @@ const PER_DOC_BUDGET_CHARS = 12000;
 // PDF — an improvement over the prior single-window (~2-3 page) coverage, not a
 // promise of full-document coverage for very large corpora.
 const MAX_WINDOWS_PER_DOC = 6;
+
+/** Include both ends while spreading a bounded sample across the whole range. */
+export function evenlySpacedIndices(total: number, limit: number): number[] {
+  if (total <= 0 || limit <= 0) return [];
+  if (total <= limit) return Array.from({ length: total }, (_, index) => index);
+  if (limit === 1) return [0];
+  const selected = new Set<number>();
+  for (let i = 0; i < limit; i++) selected.add(Math.round((i * (total - 1)) / (limit - 1)));
+  return [...selected].sort((a, b) => a - b);
+}
 
 /**
  * Split a document's chunks into budget-sized, sentence-tagged windows
@@ -62,14 +75,13 @@ export function windowDocChunks(
     used = 0;
   };
 
-  outer: for (const c of chunks) {
+  for (const c of chunks) {
     for (const s of c.sentences) {
       const sentence = c.text.slice(s.start, s.end).trim();
       if (!sentence) continue;
       const line = `[[${s.id}]] ${sentence}`;
       if (used + line.length > budget) {
         flush();
-        if (windows.length >= maxWindows) break outer;
       }
       used += line.length;
       validIds.add(s.id);
@@ -77,7 +89,10 @@ export function windowDocChunks(
     }
   }
   flush();
-  return windows.length > 0 ? windows : [{ text: '', validIds: new Set() }];
+  if (windows.length === 0) return [{ text: '', validIds: new Set() }];
+  if (!Number.isFinite(maxWindows) || windows.length <= maxWindows) return windows;
+  const count = Math.max(1, Math.floor(maxWindows));
+  return evenlySpacedIndices(windows.length, count).map((index) => windows[index]);
 }
 
 /**
@@ -147,7 +162,7 @@ export async function extractOneDoc(
     { role: 'system', content: resolvePrompt(settings.promptOverrides, 'graphExtraction') },
     { role: 'user', content: taggedText },
   ];
-  const reply = await complete(resolveModelForRole(settings, 'utility'), messages, undefined, signal);
+  const reply = await complete(resolveModelForRole(settings, 'knowledgeGraph'), messages, undefined, signal);
   const content = reply.content ?? '';
   let obj: unknown;
   try {
@@ -171,8 +186,13 @@ const COMMUNITY_MIN_SIZE = 3;
  * community rather than aborting. Evidence ids are validated against the
  * community's own sentences.
  */
-export async function summarizeCommunities(settings: Settings, graph: DocGraph, signal?: AbortSignal): Promise<CommunitySummary[]> {
-  const raw = detectCommunities(graph, { minSize: COMMUNITY_MIN_SIZE, maxCommunities: MAX_COMMUNITIES });
+export async function summarizeCommunities(
+  settings: Settings,
+  graph: DocGraph,
+  signal?: AbortSignal,
+  maxCommunities: number | undefined = MAX_COMMUNITIES,
+): Promise<CommunitySummary[]> {
+  const raw = detectCommunities(graph, { minSize: COMMUNITY_MIN_SIZE, maxCommunities });
   const out: CommunitySummary[] = [];
   for (const comm of raw) {
     if (signal?.aborted) break;
@@ -181,7 +201,7 @@ export async function summarizeCommunities(settings: Settings, graph: DocGraph, 
     const valid = new Set(evidenceIds);
     try {
       const reply = await complete(
-        resolveModelForRole(settings, 'utility'),
+        resolveModelForRole(settings, 'knowledgeGraph'),
         [
           { role: 'system', content: resolvePrompt(settings.promptOverrides, 'communitySummary') },
           { role: 'user', content: text },
@@ -204,7 +224,8 @@ export async function summarizeCommunities(settings: Settings, graph: DocGraph, 
           evidenceSentenceIds: evidence.length > 0 ? evidence : evidenceIds.slice(0, 8),
         });
       }
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
       // Model/parse failure for this community — skip it.
     }
   }
@@ -217,6 +238,9 @@ export interface GraphBuildProgress {
   currentDoc?: string;
   nodes: number;
   edges: number;
+  windowsTotal: number;
+  windowsDone: number;
+  mode: GraphCoverageMode;
 }
 
 export interface GraphBuildResult {
@@ -245,8 +269,14 @@ const REASON_LABEL: Record<'truncated' | 'parse_error' | 'empty', string> = {
 export async function buildRepoGraph(
   settings: Settings,
   repo: string,
-  opts: { rebuild?: boolean; signal?: AbortSignal; onProgress?: (p: GraphBuildProgress) => void } = {},
+  opts: {
+    rebuild?: boolean;
+    mode?: GraphCoverageMode;
+    signal?: AbortSignal;
+    onProgress?: (p: GraphBuildProgress) => void;
+  } = {},
 ): Promise<GraphBuildResult> {
+  const mode = opts.mode ?? 'quick';
   const snapshotRes = await graphSnapshot(repo);
   if (!snapshotRes.ok) return { ok: false, error: snapshotRes.error };
   const snapshot = snapshotRes.result as {
@@ -260,11 +290,58 @@ export async function buildRepoGraph(
   let graph = emptyDocGraph();
   if (!opts.rebuild) {
     const existing = await graphGet(repo);
-    if (existing.ok && existing.result) graph = existing.result as DocGraph;
+    if (!existing.ok) return { ok: false, error: existing.error };
+    if (existing.result) graph = existing.result as DocGraph;
   }
   graph.corpusRevision = expectedRevision;
-  const processed = new Set(graph.processedDocIds);
-  const todo = docs.filter((d) => !processed.has(d.id));
+  graph.version = DOC_GRAPH_VERSION;
+  graph.docCoverage ??= {};
+
+  interface DocWork {
+    doc: { id: string; name: string };
+    windows: Array<{ text: string; validIds: Set<string> }>;
+    targets: number[];
+    coverage: GraphDocCoverage;
+  }
+  const work: DocWork[] = [];
+  const setupErrors = new Map<string, string>();
+
+  // Stable filename order prevents picker/filesystem enumeration from deciding
+  // extraction priority. Model work below is interleaved one window per document.
+  for (const doc of [...docs].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))) {
+    if (opts.signal?.aborted) break;
+    let chunksRes;
+    try {
+      chunksRes = await docChunks(repo, doc.id, opts.signal);
+    } catch (error) {
+      if (opts.signal?.aborted) break;
+      setupErrors.set(doc.id, error instanceof Error ? error.message : 'Could not read document chunks.');
+      continue;
+    }
+    if (!chunksRes.ok) {
+      setupErrors.set(doc.id, chunksRes.error || 'Could not read document chunks.');
+      continue;
+    }
+    const chunks = (chunksRes.result ?? []) as Array<{ text: string; sentences: CitableSentence[] }>;
+    const windows = windowDocChunks(chunks, PER_DOC_BUDGET_CHARS, Number.POSITIVE_INFINITY);
+    const allIndices = windows.map((_, index) => index);
+    const targets = mode === 'full' || graph.coverageMode === 'full'
+      ? allIndices
+      : evenlySpacedIndices(windows.length, MAX_WINDOWS_PER_DOC);
+    const previous = graph.docCoverage[doc.id];
+    const coverage: GraphDocCoverage = previous && previous.totalWindows === windows.length
+      ? previous
+      : { totalWindows: windows.length, selectedWindows: [], completedWindows: [], failedWindows: [] };
+    coverage.selectedWindows = targets;
+    coverage.completedWindows = coverage.completedWindows.filter((index) => index < windows.length);
+    coverage.failedWindows = coverage.failedWindows.filter((index) => index < windows.length);
+    graph.docCoverage[doc.id] = coverage;
+    const pending = targets.filter((index) => !coverage.completedWindows.includes(index));
+    if (pending.length > 0) {
+      graph.processedDocIds = graph.processedDocIds.filter((id) => id !== doc.id);
+      work.push({ doc, windows, targets: pending, coverage });
+    }
+  }
 
   const report = (currentDoc?: string) =>
     opts.onProgress?.({
@@ -273,61 +350,114 @@ export async function buildRepoGraph(
       currentDoc,
       nodes: graph.nodes.length,
       edges: graph.edges.length,
+      windowsTotal: Object.values(graph.docCoverage ?? {}).reduce((sum, c) => sum + c.selectedWindows.length, 0),
+      windowsDone: Object.values(graph.docCoverage ?? {}).reduce(
+        (sum, c) => sum + c.selectedWindows.filter((index) => c.completedWindows.includes(index)).length,
+        0,
+      ),
+      mode,
     });
 
-  for (const doc of todo) {
-    if (opts.signal?.aborted) break;
-    report(doc.name);
-    let anySuccess = false;
-    let lastFailureReason = '';
-    try {
-      const chunksRes = await docChunks(repo, doc.id);
-      const chunks = (chunksRes.ok ? chunksRes.result : []) as Array<{ text: string; sentences: CitableSentence[] }>;
-      const windows = windowDocChunks(chunks);
-      for (const { text, validIds } of windows) {
-        if (validIds.size === 0) continue;
-        const outcome = await extractOneDoc(settings, text, validIds, opts.signal);
-        if (outcome.ok) {
-          mergeExtraction(graph, outcome.extraction, doc.id);
-          anySuccess = true;
-        } else {
-          lastFailureReason = REASON_LABEL[outcome.reason];
-        }
-      }
-    } catch (e) {
-      lastFailureReason = e instanceof Error ? e.message : 'extraction failed';
-    }
-    if (anySuccess) {
-      // Partial coverage (some windows succeeded) still counts as processed —
-      // better than none, and avoids re-doing the successful windows on retry.
-      markDocProcessed(graph, doc.id);
-    } else {
-      markDocFailed(graph, doc.id, lastFailureReason || 'no content could be extracted');
-    }
-    const setRes = await graphSet(repo, graph, expectedRevision); // checkpoint after every doc
+  const stoppedResult = async (): Promise<GraphBuildResult> => {
+    const setRes = await graphSet(repo, graph, expectedRevision);
     if (!setRes.ok) return { ok: false, error: setRes.error };
+    report();
+    return { ok: true, graph, warnings: ['Graph build stopped. Run the same mode again to resume from its window checkpoints.'] };
+  };
+
+  if (opts.signal?.aborted) return stoppedResult();
+
+  for (const [docId, error] of setupErrors) markDocFailed(graph, docId, error);
+
+  const maxPending = Math.max(0, ...work.map((item) => item.targets.length));
+  for (let round = 0; round < maxPending; round++) {
+    for (const item of work) {
+      if (opts.signal?.aborted) break;
+      const windowIndex = item.targets[round];
+      if (windowIndex === undefined) continue;
+      report(item.doc.name);
+      const window = item.windows[windowIndex];
+      let failure = '';
+      try {
+        if (window.validIds.size === 0) {
+          failure = 'the selected window contained no citable sentences';
+        } else {
+          const outcome = await extractOneDoc(settings, window.text, window.validIds, opts.signal);
+          if (outcome.ok) {
+            mergeExtraction(graph, outcome.extraction, item.doc.id, { markProcessed: false });
+            if (!item.coverage.completedWindows.includes(windowIndex)) item.coverage.completedWindows.push(windowIndex);
+            item.coverage.failedWindows = item.coverage.failedWindows.filter((index) => index !== windowIndex);
+          } else {
+            failure = REASON_LABEL[outcome.reason];
+          }
+        }
+      } catch (error) {
+        if (opts.signal?.aborted) break;
+        failure = error instanceof Error ? error.message : 'extraction failed';
+      }
+      if (failure) {
+        if (!item.coverage.failedWindows.includes(windowIndex)) item.coverage.failedWindows.push(windowIndex);
+        graph.docErrors ??= {};
+        graph.docErrors[item.doc.id] = `Window ${windowIndex + 1}/${item.coverage.totalWindows}: ${failure}`;
+      }
+      const setRes = await graphSet(repo, graph, expectedRevision); // checkpoint every window
+      if (!setRes.ok) return { ok: false, error: setRes.error };
+    }
+    if (opts.signal?.aborted) break;
   }
+
+  if (opts.signal?.aborted) return stoppedResult();
+
+  for (const doc of docs) {
+    const coverage = graph.docCoverage[doc.id];
+    if (!coverage) continue;
+    const complete = coverage.selectedWindows.every((index) => coverage.completedWindows.includes(index));
+    if (complete) markDocProcessed(graph, doc.id);
+    else markDocFailed(graph, doc.id, graph.docErrors?.[doc.id] || 'one or more extraction windows failed');
+  }
+  if (!opts.signal?.aborted && graph.processedDocIds.length === docs.length) {
+    if (mode === 'full' || graph.coverageMode !== 'full') graph.coverageMode = mode;
+  }
+  const coverageSet = await graphSet(repo, graph, expectedRevision);
+  if (!coverageSet.ok) return { ok: false, error: coverageSet.error };
 
   // Once every document has been attempted (success or failure), cluster the
   // graph into themes (global sensemaking). Re-summarize when new docs were
   // processed, on an explicit rebuild, or when no themes exist yet.
   const attempted = graph.processedDocIds.length + (graph.failedDocIds?.length ?? 0);
   const allAttempted = attempted >= docs.length;
-  const shouldSummarize = allAttempted && !opts.signal?.aborted && (opts.rebuild || !graph.communities || todo.length > 0);
+  const shouldSummarize = allAttempted && !opts.signal?.aborted && (opts.rebuild || !graph.communities || work.length > 0);
   if (shouldSummarize && graph.nodes.length > 0) {
-    graph.communities = await summarizeCommunities(settings, graph, opts.signal);
+    try {
+      graph.communities = await summarizeCommunities(
+        settings,
+        graph,
+        opts.signal,
+        mode === 'full' ? undefined : MAX_COMMUNITIES,
+      );
+    } catch (error) {
+      if (opts.signal?.aborted) return stoppedResult();
+      throw error;
+    }
     const setRes = await graphSet(repo, graph, expectedRevision);
     if (!setRes.ok) return { ok: false, error: setRes.error };
   }
 
   report();
-  const warnings =
-    graph.failedDocIds && graph.failedDocIds.length > 0
-      ? [
+  const warnings: string[] = [];
+  if (graph.failedDocIds && graph.failedDocIds.length > 0) {
+    warnings.push(
           `${graph.failedDocIds.length} document(s) could not be extracted: ${graph.failedDocIds
             .map((id) => docs.find((d) => d.id === id)?.name ?? id)
             .join(', ')}.`,
-        ]
-      : undefined;
-  return { ok: true, graph, warnings };
+    );
+  }
+  if (mode === 'quick') {
+    const omitted = Object.values(graph.docCoverage).reduce(
+      (sum, coverage) => sum + Math.max(0, coverage.totalWindows - coverage.selectedWindows.length),
+      0,
+    );
+    if (omitted > 0) warnings.push(`Quick coverage sampled across each document; ${omitted} window(s) require Full Coverage.`);
+  }
+  return { ok: true, graph, warnings: warnings.length > 0 ? warnings : undefined };
 }

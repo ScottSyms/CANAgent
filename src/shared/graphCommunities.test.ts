@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { emptyDocGraph, mergeExtraction, type CommunitySummary } from './docGraph';
-import { detectCommunities, renderCommunitiesForModel, renderCommunityForModel } from './graphCommunities';
+import { detectCommunities, rankCommunities, renderCommunitiesForModel, renderCommunityForModel } from './graphCommunities';
 
 // Build a graph with two clearly separate clusters joined by no edges:
 //   Cluster 1: A—B—C   Cluster 2: X—Y—Z
@@ -63,5 +63,71 @@ describe('render helpers', () => {
     const text = renderCommunitiesForModel(summaries);
     expect(text).toContain('## Theme One');
     expect(text).toContain('[[s1]] [[s2]]');
+  });
+});
+
+describe('rankCommunities', () => {
+  function thematicGraph() {
+    const g = emptyDocGraph();
+    g.nodes = [
+      {
+        id: 'identity',
+        type: 'system',
+        label: 'Microsoft Entra ID',
+        aliases: ['Azure AD'],
+        summary: 'Provides authentication and identity governance.',
+        evidenceSentenceIds: ['s1'],
+        docIds: ['d1'],
+      },
+      {
+        id: 'budget',
+        type: 'process',
+        label: 'Financial planning',
+        aliases: [],
+        summary: 'Forecasting budgets and expenditures.',
+        evidenceSentenceIds: ['s2'],
+        docIds: ['d2'],
+      },
+    ];
+    g.edges = [{ id: 'e1', from: 'identity', to: 'identity', relation: 'authenticates', evidenceSentenceIds: ['s1'] }];
+    g.communities = [
+      { id: 'security', title: 'Identity security', summary: 'Authentication controls.', nodeIds: ['identity'], evidenceSentenceIds: ['s1'] },
+      { id: 'finance', title: 'Budget planning', summary: 'Financial forecasts.', nodeIds: ['budget'], evidenceSentenceIds: ['s2'] },
+      ...Array.from({ length: 5 }, (_, i) => ({
+        id: `other-${i}`,
+        title: `Other topic ${i}`,
+        summary: 'Unrelated material.',
+        nodeIds: [],
+        evidenceSentenceIds: [`o${i}`],
+      })),
+    ];
+    return g;
+  }
+
+  it('ranks titles, member aliases, and internal relations against the query', () => {
+    const ranked = rankCommunities(thematicGraph(), 'How does Azure AD authenticate users?');
+    expect(ranked.map((community) => community.id)).toEqual(['security']);
+    expect(rankCommunities(thematicGraph(), 'authenticates').map((community) => community.id)).toEqual(['security']);
+  });
+
+  it('returns only communities with support for a specific query', () => {
+    const ranked = rankCommunities(thematicGraph(), 'budget forecast');
+    expect(ranked.map((community) => community.id)).toEqual(['finance']);
+    expect(rankCommunities(thematicGraph(), 'quantum biology')).toEqual([]);
+  });
+
+  it('returns the first five communities for a generic corpus-level request', () => {
+    const ranked = rankCommunities(thematicGraph(), 'What are the main themes in the whole collection?');
+    expect(ranked).toHaveLength(5);
+    expect(ranked.map((community) => community.id)).toEqual(['security', 'finance', 'other-0', 'other-1', 'other-2']);
+  });
+
+  it('uses original community order as a deterministic tie-break', () => {
+    const g = thematicGraph();
+    g.communities = [
+      { id: 'first', title: 'Cloud one', summary: '', nodeIds: [], evidenceSentenceIds: [] },
+      { id: 'second', title: 'Cloud two', summary: '', nodeIds: [], evidenceSentenceIds: [] },
+    ];
+    expect(rankCommunities(g, 'cloud').map((community) => community.id)).toEqual(['first', 'second']);
   });
 });

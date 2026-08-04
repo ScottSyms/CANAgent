@@ -758,12 +758,15 @@ roles:
 | Role | Covers |
 |---|---|
 | **Utility** | Conversation titles/summaries, the self-check pass on a draft answer, skill creation, compacting old tool output, and improving knowledge-base search queries. |
+| **Knowledge Graph** | Entity and relationship extraction plus graph community/theme summaries. When unassigned, this role inherits Utility and then the main model. |
 | **Reflection** | Learning a behavioral lesson from a task, and extracting/merging durable memory facts. |
 | **Plan** | The scoped research subtasks a multi-step plan spins up. |
 | **Vision** | Interpreting images you attach to a chat, reading tab snapshots, and OCR when normal page extraction fails. If your main model can't accept images, assign a vision-capable model here and image requests are routed to it automatically. |
 
-A role with no profile assigned just uses the main model — nothing changes
-until you explicitly assign one. Tag a profile **Local** only if it's
+A role with no profile assigned just uses the main model, except **Knowledge
+Graph**, which first inherits the Utility assignment for backward
+compatibility. Nothing changes until you explicitly assign a profile. Local
+OpenAI-compatible endpoints such as Ollama may leave API key blank. Tag a profile **Local** only if it's
 genuinely private (e.g. running on your own machine); the **"Restrict
 background tasks to local-tagged profiles"** toggle, when on, refuses to
 route any role to a profile that isn't tagged Local, falling back to the main

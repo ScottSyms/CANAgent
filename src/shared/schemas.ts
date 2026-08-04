@@ -419,13 +419,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: 'search_repo',
       description:
-        'Retrieve the most relevant passages from a named on-device repository for a query (local embedding search). Answer the user from the returned passages and cite each passage\'s page name and URL.',
+        'Retrieve the most relevant grounded passages from a named on-device repository using semantic, keyword, and automatically available knowledge-graph evidence. Use this as the default repository search; answer from the returned passages and cite their [[sentence-id]] tokens.',
       parameters: {
         type: 'object',
         properties: {
           repo: { type: 'string', description: 'Repository name to search.' },
           query: { type: 'string', description: 'What to look for.' },
-          k: { type: 'number', description: 'How many passages to return (default 6).' },
+          k: { type: 'number', minimum: 1, maximum: 20, description: 'How many passages to return (default 6, max 20).' },
         },
         required: ['repo', 'query'],
       },
@@ -437,10 +437,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       name: 'search_graph',
       description:
         'Query the knowledge graph extracted from a repository: returns the entities and relationships most relevant ' +
-        'to the query, expanded one hop, each tagged with [[sentence-id]] evidence. Prefer this over search_repo for ' +
-        'questions about how things relate, who is connected to what, or that need facts spread across multiple ' +
-        'documents (multi-hop). Cite the [[sentence-id]] tokens exactly as given. Requires a graph to have been built ' +
-        'for the repository.',
+        'to the query, expanded one hop, each tagged with [[sentence-id]] evidence. Use this when the user explicitly ' +
+        'needs graph topology, named connections, or entity-to-entity relationships; ordinary search_repo already ' +
+        'uses graph evidence automatically when available. Cite the [[sentence-id]] tokens exactly as given. Requires ' +
+        'a graph to have been built for the repository.',
       parameters: {
         type: 'object',
         properties: {
@@ -459,7 +459,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       description:
         'Answer a corpus-level question about a repository (notebook) by synthesizing across its knowledge-graph ' +
         'themes. Use for broad "what are the main themes / how does it all fit together / summarize the whole ' +
-        'collection" questions that no single passage or entity answers. Returns each theme with a summary and ' +
+        'collection" questions that no single passage or entity answers. Returns up to five query-ranked themes with a summary and ' +
         '[[sentence-id]] evidence; synthesize an answer across them and cite the ids. Requires a graph with themes ' +
         'to have been built.',
       parameters: {
@@ -478,6 +478,22 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       name: 'list_repos',
       description: 'List the on-device repositories with their document and chunk counts.',
       parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'request_web_fallback',
+      description:
+        'Ask the user for permission to supplement an explicitly selected repository with external web sources. ' +
+        'Use only when repository retrieval is insufficient. External tools remain unavailable unless the user approves.',
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: { type: 'string', description: 'Why the selected repository is insufficient and web access would help.' },
+        },
+        required: ['reason'],
+      },
     },
   },
   {

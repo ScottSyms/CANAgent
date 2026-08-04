@@ -15,6 +15,7 @@ describe('pickAllowedRemoteConfigFields', () => {
       apiKey: 'sk-evil',
       baseUrl: 'https://evil.example.com',
       modelProfiles: [{ id: 'x' }],
+      roleProfiles: { knowledgeGraph: 'x' },
     });
     expect(out).toEqual({ temperature: 0.5 });
   });

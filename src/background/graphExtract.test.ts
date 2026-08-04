@@ -2,9 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // complete() is the only model touchpoint; mock it so extraction is deterministic.
 const complete = vi.fn();
+const resolveModelForRole = vi.fn((settings: unknown, _role: unknown) => settings);
 vi.mock('./llmProvider', () => ({
   complete: (...a: unknown[]) => complete(...a),
-  resolveModelForRole: (s: unknown) => s,
+  resolveModelForRole: (settings: unknown, role: unknown) => resolveModelForRole(settings, role),
 }));
 const graphSnapshot = vi.fn();
 const graphGet = vi.fn();
@@ -17,12 +18,21 @@ vi.mock('./offscreenClient', () => ({
   docChunks: (...a: unknown[]) => docChunks(...a),
 }));
 
-import { buildRepoGraph, extractOneDoc, looksTruncated, summarizeCommunities, tagDocChunks, windowDocChunks } from './graphExtract';
+import {
+  buildRepoGraph,
+  evenlySpacedIndices,
+  extractOneDoc,
+  looksTruncated,
+  summarizeCommunities,
+  tagDocChunks,
+  windowDocChunks,
+} from './graphExtract';
 import { emptyDocGraph, mergeExtraction } from '../shared/docGraph';
 import type { Settings } from '../shared/types';
 
 afterEach(() => {
   complete.mockReset();
+  resolveModelForRole.mockClear();
   graphSnapshot.mockReset();
   graphGet.mockReset();
   graphSet.mockReset();
@@ -66,7 +76,7 @@ describe('windowDocChunks', () => {
     for (const w of windows) expect(new Set(w.validIds).size).toBe([...w.validIds].length); // no duplicates within a window
   });
 
-  it('caps at maxWindows, dropping the remainder', () => {
+  it('caps at maxWindows while sampling through the end of the document', () => {
     const sentences = Array.from({ length: 10 }, (_, i) => ({ id: `s${i}`, start: 0, end: 5 }));
     const text = 'x'.repeat(50);
     const windows = windowDocChunks(
@@ -74,11 +84,20 @@ describe('windowDocChunks', () => {
       1, // each sentence alone exceeds this budget, forcing a new window every time
       3,
     );
-    expect(windows.length).toBeLessThanOrEqual(3);
+    expect(windows).toHaveLength(3);
+    expect([...windows[0].validIds]).toEqual(['s0']);
+    expect([...windows.at(-1)!.validIds]).toEqual(['s9']);
   });
 
   it('returns a single empty window for no input', () => {
     expect(windowDocChunks([])).toEqual([{ text: '', validIds: new Set() }]);
+  });
+});
+
+describe('evenlySpacedIndices', () => {
+  it('includes both ends and deterministic interior positions', () => {
+    expect(evenlySpacedIndices(10, 3)).toEqual([0, 5, 9]);
+    expect(evenlySpacedIndices(4, 6)).toEqual([0, 1, 2, 3]);
   });
 });
 
@@ -166,6 +185,12 @@ describe('extractOneDoc', () => {
     const messages = complete.mock.calls.at(-1)?.[1];
     expect(messages[0].content).toContain('You extract a knowledge graph from ONE document');
   });
+
+  it('routes entity and relationship extraction through the Knowledge Graph role', async () => {
+    complete.mockResolvedValue({ content: '{"entities":[],"relations":[]}' });
+    await extractOneDoc(S, 'x', new Set());
+    expect(resolveModelForRole).toHaveBeenCalledWith(S, 'knowledgeGraph');
+  });
 });
 
 describe('summarizeCommunities', () => {
@@ -218,6 +243,21 @@ describe('summarizeCommunities', () => {
     const messages = complete.mock.calls.at(-1)?.[1];
     expect(messages[0]).toEqual({ role: 'system', content: 'CUSTOM COMMUNITY PROMPT' });
   });
+
+  it('routes community summaries through the Knowledge Graph role', async () => {
+    const g = emptyDocGraph();
+    mergeExtraction(g, {
+      entities: [],
+      relations: [
+        { from: 'A', to: 'B', relation: 'r', evidence: ['s1'] },
+        { from: 'B', to: 'C', relation: 'r', evidence: ['s2'] },
+        { from: 'A', to: 'C', relation: 'r', evidence: ['s3'] },
+      ],
+    }, 'd');
+    complete.mockResolvedValue({ content: '{"title":"T","summary":"S","evidence":["s1"]}' });
+    await summarizeCommunities(S, g);
+    expect(resolveModelForRole).toHaveBeenCalledWith(S, 'knowledgeGraph');
+  });
 });
 
 describe('buildRepoGraph corpus revision', () => {
@@ -246,5 +286,89 @@ describe('buildRepoGraph corpus revision', () => {
       error: 'Repository changed while the graph was being built. Rebuild the graph.',
     });
     expect(graphSet).toHaveBeenCalledWith('repo', expect.objectContaining({ corpusRevision: 4 }), 4);
+  });
+});
+
+describe('buildRepoGraph coverage', () => {
+  const longDoc = (docId: string, count = 8) => Array.from({ length: count }, (_, i) => {
+    const text = `${docId}-${i} ` + 'x'.repeat(12_100);
+    return { text, sentences: [{ id: `${docId}:c${i}:s0`, start: 0, end: text.length }] };
+  });
+
+  it('quick mode samples every document from beginning to end and interleaves model calls', async () => {
+    graphSnapshot.mockResolvedValue({
+      ok: true,
+      result: { docs: [{ id: 'b', name: 'B.md' }, { id: 'a', name: 'A.md' }], corpusRevision: 1 },
+    });
+    graphGet.mockResolvedValue({ ok: true, result: null });
+    docChunks.mockImplementation(async (_repo: string, id: string) => ({ ok: true, result: longDoc(id) }));
+    graphSet.mockResolvedValue({ ok: true });
+    complete.mockImplementation(async (_settings: unknown, messages: Array<{ content: string }>) => {
+      const id = messages[1].content.match(/^\[\[([^\]]+)\]\]/)?.[1] ?? 'missing';
+      return { content: JSON.stringify({ entities: [{ label: id, type: 'fact', summary: id, evidence: [id] }], relations: [] }) };
+    });
+
+    const result = await buildRepoGraph(S, 'repo', { mode: 'quick' });
+
+    expect(result.ok).toBe(true);
+    expect(result.graph?.docCoverage?.a.selectedWindows).toEqual([0, 1, 3, 4, 6, 7]);
+    expect(result.graph?.docCoverage?.b.selectedWindows).toEqual([0, 1, 3, 4, 6, 7]);
+    expect(result.graph?.processedDocIds.sort()).toEqual(['a', 'b']);
+    expect(result.graph?.coverageMode).toBe('quick');
+    const extractionInputs = complete.mock.calls.map((call) => call[1][1].content as string);
+    expect(extractionInputs[0]).toContain('[[a:c0:s0]]');
+    expect(extractionInputs[1]).toContain('[[b:c0:s0]]');
+    expect(extractionInputs).toContainEqual(expect.stringContaining('[[a:c7:s0]]'));
+    expect(extractionInputs).toContainEqual(expect.stringContaining('[[b:c7:s0]]'));
+    expect(result.warnings?.join(' ')).toContain('Full Coverage');
+  });
+
+  it('full mode resumes legacy/partial coverage and processes every remaining window', async () => {
+    const existing = emptyDocGraph();
+    existing.corpusRevision = 2;
+    existing.docCoverage = {
+      a: { totalWindows: 3, selectedWindows: [0], completedWindows: [0], failedWindows: [] },
+    };
+    graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [{ id: 'a', name: 'A.md' }], corpusRevision: 2 } });
+    graphGet.mockResolvedValue({ ok: true, result: existing });
+    docChunks.mockResolvedValue({ ok: true, result: longDoc('a', 3) });
+    graphSet.mockResolvedValue({ ok: true });
+    complete.mockImplementation(async (_settings: unknown, messages: Array<{ content: string }>) => {
+      const id = messages[1].content.match(/^\[\[([^\]]+)\]\]/)?.[1] ?? 'missing';
+      return { content: JSON.stringify({ entities: [{ label: id, type: 'fact', summary: id, evidence: [id] }], relations: [] }) };
+    });
+
+    const result = await buildRepoGraph(S, 'repo', { mode: 'full' });
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(result.graph?.docCoverage?.a.completedWindows.sort()).toEqual([0, 1, 2]);
+    expect(result.graph?.docCoverage?.a.selectedWindows).toEqual([0, 1, 2]);
+    expect(result.graph?.coverageMode).toBe('full');
+    expect(result.graph?.processedDocIds).toEqual(['a']);
+  });
+
+  it('stops without marking partial coverage failed and can resume from its checkpoint', async () => {
+    const controller = new AbortController();
+    graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [{ id: 'a', name: 'A.md' }], corpusRevision: 3 } });
+    graphGet.mockResolvedValue({ ok: true, result: null });
+    docChunks.mockResolvedValue({ ok: true, result: longDoc('a', 3) });
+    graphSet.mockResolvedValue({ ok: true });
+    complete
+      .mockResolvedValueOnce({
+        content: '{"entities":[{"label":"first","type":"fact","summary":"first","evidence":["a:c0:s0"]}],"relations":[]}',
+      })
+      .mockImplementationOnce(async () => {
+        controller.abort(new DOMException('Stopped', 'AbortError'));
+        throw controller.signal.reason;
+      });
+
+    const result = await buildRepoGraph(S, 'repo', { mode: 'full', signal: controller.signal });
+
+    expect(result.ok).toBe(true);
+    expect(result.warnings?.[0]).toContain('stopped');
+    expect(result.graph?.docCoverage?.a.completedWindows).toEqual([0]);
+    expect(result.graph?.docCoverage?.a.failedWindows).toEqual([]);
+    expect(result.graph?.processedDocIds).toEqual([]);
+    expect(result.graph?.failedDocIds).toBeUndefined();
   });
 });

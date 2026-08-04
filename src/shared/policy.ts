@@ -176,6 +176,7 @@ export const TOOL_ACTION_CLASS: Record<string, ActionClass> = {
   draft_email: 'external_comms',
   call_mcp_tool: 'external_comms',
   call_webmcp_tool: 'external_comms',
+  request_web_fallback: 'external_comms',
   get_all_tab_contents: 'external_comms', // bulk cross-tab read — treat as sensitive per spec
 
   // --- persistence / record modification --------------------------------

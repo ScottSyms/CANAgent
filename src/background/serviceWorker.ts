@@ -50,7 +50,7 @@ import type { DocGraph } from '../shared/docGraph';
 
 // Repos with a graph build currently in flight (in-memory; lost on SW eviction,
 // after which a build resumes from the checkpointed graph on the next request).
-const graphBuilding = new Set<string>();
+const graphBuilding = new Map<string, AbortController>();
 import { ingestFile } from './repoIngest';
 import { indexMailbox, type MailSyncProgress } from './mailIngest';
 import {
@@ -392,6 +392,11 @@ chrome.runtime.onConnect.addListener((port) => {
 // management. Each handler returns `true` to keep the message channel open for
 // the async `sendResponse` (a Chrome messaging requirement).
 chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResponse) => {
+  if (request.type === 'stop_task') {
+    runtime.stop();
+    sendResponse({ ok: true });
+    return false;
+  }
   if (request.type === 'test_connection') {
     testConnection(request.settings).then((result: TestConnectionResponse) => sendResponse(result));
     return true; // async response
@@ -475,9 +480,14 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
       if (graphBuilding.has(request.repo)) return { ok: false, error: 'A graph build is already running for this notebook.' };
-      graphBuilding.add(request.repo);
+      const controller = new AbortController();
+      graphBuilding.set(request.repo, controller);
       try {
-        return await buildRepoGraph(settings, request.repo, { rebuild: request.rebuild });
+        return await buildRepoGraph(settings, request.repo, {
+          rebuild: request.rebuild,
+          mode: request.mode ?? 'quick',
+          signal: controller.signal,
+        });
       } finally {
         graphBuilding.delete(request.repo);
       }
@@ -485,6 +495,11 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
+  }
+  if (request.type === 'notebook_graph_cancel') {
+    graphBuilding.get(request.repo)?.abort(new DOMException('Graph build stopped by user.', 'AbortError'));
+    sendResponse({ ok: true });
+    return false;
   }
   if (request.type === 'notebook_graph_evidence') {
     resolveSentenceCitations(request.repo, request.sentenceIds)
