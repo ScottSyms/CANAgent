@@ -1,8 +1,8 @@
 /* Shared brand palette — imported by both the side panel (styles.css) and the
    full-tab workspace (workspace.css) so they render in one identical theme.
    Follows the browser/OS theme: light by default, dark via media query.
-   Derived from the MySSC+ indigo→magenta gradient. --accent drives every
-   interactive accent; magenta is decorative/large-UI only (never body text). */
+   Derived from the MySSC+ indigo→magenta palette. --accent is for links and
+   focus; --accent-fill keeps filled controls AA-compliant in both schemes. */
 :root {
   color-scheme: light dark;
   --bg: #ffffff;
@@ -16,25 +16,33 @@
   --text-dim: #5a5366;
   --accent: #6e2a8c;
   --accent-dim: #56206e;
+  --accent-fill: #6e2a8c;
+  --accent-fill-hover: #56206e;
   --brand-soft: #f1e9f6;
   --magenta: #c0249e;
-  --brand-grad: linear-gradient(135deg, #6e2a8c 0%, #c0249e 100%);
   /* Status colors sit at ≥ 4.5:1 (WCAG 2.1 AA, normal text) on --bg and
      --bg-panel; the previous ok/warn values measured 4.1:1 and 4.4:1. */
   --ok: #187a41;
   --warn: #8a6410;
   --error: #c03434;
-  /* Faint elevation for cards/overlays; dark mode leans on surface color
-     instead of shadow, so these stay subtle there too. */
-  --shadow-1: 0 1px 2px rgba(28, 23, 38, 0.05), 0 1px 8px rgba(28, 23, 38, 0.05);
+  /* Strong elevation is reserved for menus and modal surfaces. */
   --shadow-2: 0 4px 14px rgba(28, 23, 38, 0.12), 0 14px 40px rgba(28, 23, 38, 0.14);
+  /* App chrome is opaque by default. Supporting browsers progressively enhance
+     these surfaces with bounded blur; content surfaces never use these tokens. */
+  --glass-surface: #faf8fc;
+  --glass-surface-enhanced: rgb(250 248 252 / 0.8);
+  --glass-border: rgb(86 32 110 / 0.18);
+  --glass-shadow: 0 8px 24px rgb(28 23 38 / 0.1), inset 0 1px 0 rgb(255 255 255 / 0.58);
+  --glass-blur: 18px;
+  --glass-saturation: 1.18;
+  --scrim-soft: rgb(28 23 38 / 0.38);
   /* Label palette — light. Each key has a soft tinted bg + readable fg. */
   --chip-red-bg: #fbe0e0;
   --chip-red-fg: #a32626;
   --chip-amber-bg: #fbeccc;
   --chip-amber-fg: #8a5a05;
   --chip-green-bg: #d8f0df;
-  --chip-green-fg: #1f7a3d;
+  --chip-green-fg: #1d7339;
   --chip-teal-bg: #d0eeef;
   --chip-teal-fg: #0f6e72;
   --chip-blue-bg: #d9e6fb;
@@ -57,16 +65,22 @@
     --border: #3a3147;
     --text: #ece8f2;
     --text-dim: #a79fb6;
-    /* Medium orchid: reads as link text on the dark bg (~4.6:1) and carries
-       white button text (~3.6:1). --accent-dim is the deeper bubble/hover tone. */
+    /* Medium orchid remains readable as link text; filled controls use the
+       deeper --accent-fill so white labels exceed 4.5:1. */
     --accent: #a86fc8;
     --accent-dim: #8a4fb0;
+    --accent-fill: #8a4fb0;
+    --accent-fill-hover: #743b98;
     --brand-soft: #2c2440;
     --magenta: #d85ab8;
-    --brand-grad: linear-gradient(135deg, #7e3aa0 0%, #c0249e 100%);
     --ok: #3fb96c;
     --warn: #d8a01d;
     --error: #e05d5d;
+    --glass-surface: #262031;
+    --glass-surface-enhanced: rgb(38 32 49 / 0.82);
+    --glass-border: rgb(255 255 255 / 0.18);
+    --glass-shadow: 0 10px 28px rgb(0 0 0 / 0.32), inset 0 1px 0 rgb(255 255 255 / 0.12);
+    --scrim-soft: rgb(0 0 0 / 0.54);
     /* Label palette — dark. Muted bg with a brighter readable fg. */
     --chip-red-bg: #4a2526;
     --chip-red-fg: #f1a3a3;
@@ -84,5 +98,59 @@
     --chip-pink-fg: #ec9fcb;
     --chip-slate-bg: #34363f;
     --chip-slate-fg: #b6b8c2;
+  }
+}
+
+/* Shared material primitive for navigation and high-value floating controls. */
+.glass-surface {
+  isolation: isolate;
+  color: var(--text);
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-surface {
+    background: var(--glass-surface-enhanced);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .glass-surface {
+    background: var(--glass-surface);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .glass-surface {
+    border-color: currentColor;
+    border-width: 2px;
+    box-shadow: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .glass-surface {
+    color: CanvasText;
+    background: Canvas;
+    border: 1px solid CanvasText;
+    box-shadow: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 }

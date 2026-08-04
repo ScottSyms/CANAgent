@@ -110,12 +110,11 @@ function ensureBanner(state: PointerState): HTMLDivElement {
     'max-width:320px',
     'padding:8px 10px',
     'border-radius:10px',
-    'background:rgba(15,23,42,0.96)',
+    'background:#0f172a',
     'color:#fff',
     'font:12px/1.3 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
     'box-shadow:0 10px 30px rgba(0,0,0,0.22)',
-    'border:1px solid rgba(148,163,184,0.35)',
-    'backdrop-filter:blur(8px)',
+    'border:1px solid #64748b',
   ].join(';');
   document.documentElement.appendChild(banner);
   state.banner = banner;

@@ -25,9 +25,11 @@ html, body, #app { margin: 0; height: 100%; font-family: -apple-system, BlinkMac
   flex-wrap: wrap;
   gap: 8px 4px;
   padding: 10px 16px;
-  background: var(--bg-card);
-  border-bottom: 2px solid transparent;
-  border-image: var(--brand-grad) 1;
+  position: relative;
+  z-index: 20;
+  border: 0;
+  border-bottom: 1px solid var(--glass-border);
+  border-radius: 0;
 }
 .ws-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); flex-shrink: 0; }
 .ws-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); display: inline-block; }
@@ -49,7 +51,7 @@ html, body, #app { margin: 0; height: 100%; font-family: -apple-system, BlinkMac
   transition: background 0.12s ease, color 0.12s ease;
 }
 .ws-nav-btn:hover { background: var(--bg-input); color: var(--text); }
-.ws-nav-btn.is-active { background: var(--accent); color: #fff; font-weight: 600; }
+.ws-nav-btn.is-active { background: var(--accent-fill); color: #fff; font-weight: 600; }
 /* Mouse/programmatic focus shouldn't leave a stray highlight once the click
    lands — only keyboard focus should (handled by the global :focus-visible
    rule above). Inset rather than the global rule's positive offset: on a
@@ -207,14 +209,14 @@ html, body, #app { margin: 0; height: 100%; font-family: -apple-system, BlinkMac
 .btn:hover:not(:disabled) { background: var(--brand-soft); }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn-small { padding: 3px 8px; font-size: 12px; }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn-primary:hover:not(:disabled) { background: var(--accent-dim); }
+.btn-primary { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
 
 .ws-btn { padding: 5px 11px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text); cursor: pointer; font-size: 13px; }
 .ws-btn:hover:not(:disabled) { background: var(--brand-soft); }
 .ws-btn:disabled { opacity: 0.5; cursor: default; }
-.ws-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.ws-btn-primary:hover:not(:disabled) { background: var(--accent-dim); }
+.ws-btn-primary { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
+.ws-btn-primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
 .ws-btn-quiet { border: none; background: transparent; color: var(--text-dim); padding: 2px 6px; }
 .ws-btn-quiet:hover:not(:disabled) { color: var(--error); background: transparent; }
 .ws-link { border: none; background: none; color: var(--accent); cursor: pointer; font-size: 13px; font-weight: 500; padding: 0; text-align: left; }
@@ -397,7 +399,7 @@ html, body, #app { margin: 0; height: 100%; font-family: -apple-system, BlinkMac
   transition: background 0.12s, color 0.12s;
 }
 .ws-notebook-subtab:hover { background: var(--bg-input); color: var(--text); }
-.ws-notebook-subtab.is-active { background: var(--accent); color: #fff; font-weight: 600; }
+.ws-notebook-subtab.is-active { background: var(--accent-fill); color: #fff; font-weight: 600; }
 
 .ws-notebook-subcontent { flex: 1; }
 
@@ -413,3 +415,59 @@ html, body, #app { margin: 0; height: 100%; font-family: -apple-system, BlinkMac
   gap: 12px;
 }
 .ws-indexing-card h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+
+@media (max-width: 760px) {
+  .ws-header { padding: 8px 10px; }
+  .ws-nav { order: 3; flex-basis: 100%; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 3px; }
+  .ws-nav-btn { min-height: 32px; flex: none; }
+  .ws-status { margin-left: auto; }
+  .ws-body { flex-direction: column; overflow-y: auto; }
+  .ws-sidebar { width: 100%; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--border); }
+  .ws-main { overflow: visible; padding: 16px; }
+  .ws-detail-panes { grid-template-columns: 1fr; }
+  .ws-memory-page,
+  .ws-audit-layout,
+  .ws-jobs-layout,
+  .ws-notebook-layout { flex-direction: column; }
+  .ws-memory-list-pane,
+  .ws-audit-convos,
+  .ws-jobs-list,
+  .ws-notebook-master { width: 100%; }
+  .ws-indexing-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-contrast: more) {
+  .ws-header {
+    border-bottom: 2px solid currentColor;
+    box-shadow: none;
+  }
+
+  .ws-nav-btn.is-active,
+  .ws-notebook-subtab.is-active,
+  .ws-chip {
+    outline: 2px solid currentColor;
+    outline-offset: -2px;
+  }
+}
+
+@media (forced-colors: active) {
+  .ws-header,
+  .ws-nav-btn,
+  .ws-notebook-subtab,
+  .ws-chip {
+    color: ButtonText;
+    background: Canvas;
+    border-color: ButtonText;
+    box-shadow: none;
+  }
+
+  .ws-nav-btn.is-active,
+  .ws-notebook-subtab.is-active {
+    color: HighlightText;
+    background: Highlight;
+  }
+
+  :where(a[href], button, [role='tab'], [tabindex]:not([tabindex='-1'])):focus-visible {
+    outline-color: Highlight;
+  }
+}

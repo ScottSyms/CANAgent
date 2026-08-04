@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from 'preact/hooks';
 import type { Citation } from '../shared/types';
+import { useModalFocus } from './useModalFocus';
 
 /** Append `#page=N` for PDF deep-linking, unless the URL already carries a hash. */
 function withPage(url: string, page?: number): string {
@@ -19,7 +20,7 @@ export function CitationView({ citation, onClose }: { citation: Citation; onClos
   const before = chunkText.slice(0, start);
   const sentence = chunkText.slice(start, end);
   const after = chunkText.slice(end);
-  const viewRef = useRef<HTMLDivElement>(null);
+  const viewRef = useModalFocus<HTMLDivElement>(onClose);
   const markRef = useRef<HTMLElement>(null);
 
   useLayoutEffect(() => {
@@ -39,7 +40,9 @@ export function CitationView({ citation, onClose }: { citation: Citation; onClos
         ref={viewRef}
         class="citation-view"
         role="dialog"
+        aria-modal="true"
         aria-label="Citation source"
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
         <div class="citation-view-head">

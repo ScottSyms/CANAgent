@@ -49,4 +49,24 @@ describe('CitationView', () => {
     act(() => render(h(CitationView, { citation: citation('second:c0:s0#bbbbbb'), onClose: () => {} }), root));
     expect(view?.scrollTop).toBe(410);
   });
+
+  it('behaves as a modal and restores focus after Escape closes it', () => {
+    const root = document.createElement('div');
+    const trigger = document.createElement('button');
+    document.body.append(trigger, root);
+    trigger.focus();
+
+    const close = vi.fn(() => render(null, root));
+    act(() => render(h(CitationView, { citation: citation('first:c0:s0#aaaaaa'), onClose: close }), root));
+
+    const dialog = root.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog?.getAttribute('aria-modal')).toBe('true');
+    expect(dialog?.contains(document.activeElement)).toBe(true);
+
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(close).toHaveBeenCalledOnce();
+    expect(trigger).toBe(document.activeElement);
+  });
 });

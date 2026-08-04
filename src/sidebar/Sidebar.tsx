@@ -400,7 +400,7 @@ export function Sidebar() {
           </button>
         </div>
       )}
-      <header class="header">
+      <header class="header glass-surface">
         <div class="brand">
           <span class="title" title={`CANChat Agent · build ${__APP_VERSION__}`}>CANChat Agent</span>
           <span class={`status status-${status}`}>

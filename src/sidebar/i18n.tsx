@@ -30,6 +30,7 @@ const EN: Dict = {
   'common.save': 'Save',
   'common.delete': 'Delete',
   'common.dismiss': 'Dismiss',
+  'common.close': 'Close',
   // projects
   'projects.switcher': 'Active project',
   'projects.none': 'No project',
@@ -474,6 +475,7 @@ const FR: Dict = {
   'common.save': 'Enregistrer',
   'common.delete': 'Supprimer',
   'common.dismiss': 'Ignorer',
+  'common.close': 'Fermer',
   // projects
   'projects.switcher': 'Projet actif',
   'projects.none': 'Aucun projet',

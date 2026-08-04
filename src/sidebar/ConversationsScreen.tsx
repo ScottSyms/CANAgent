@@ -27,6 +27,7 @@ import { getConversation, getConversationIndex } from '../background/storage';
 import { downloadBlob, exportConversationHtml } from './conversationExport';
 import { useT } from './i18n';
 import { LabelPicker } from './LabelPicker';
+import { useModalFocus } from './useModalFocus';
 
 const INDEX_KEY = 'ba_conv_index';
 const LABELS_KEY = 'ba_conv_labels';
@@ -77,6 +78,7 @@ interface Props {
 
 export function ConversationsScreen({ send, onClose }: Props) {
   const t = useT();
+  const dialogRef = useModalFocus<HTMLDivElement>(onClose);
   const [items, setItems] = useState<ConversationSummary[]>([]);
   const [labels, setLabels] = useState<ConversationLabel[]>([]);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
@@ -229,10 +231,17 @@ export function ConversationsScreen({ send, onClose }: Props) {
 
   return (
     <div class="settings-overlay">
-      <div class="settings-card">
+      <div
+        ref={dialogRef}
+        class="settings-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="conversation-history-title"
+        tabIndex={-1}
+      >
         <div class="settings-header">
-          <strong>{t('conversations.title')}</strong>
-          <button class="icon-btn" onClick={onClose}>
+          <strong id="conversation-history-title">{t('conversations.title')}</strong>
+          <button class="icon-btn" aria-label={t('common.close')} onClick={onClose}>
             ✕
           </button>
         </div>

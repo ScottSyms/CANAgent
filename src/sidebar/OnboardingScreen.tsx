@@ -7,6 +7,7 @@ import { useState } from 'preact/hooks';
 import type { TestConnectionResponse } from '../shared/messages';
 import type { Settings } from '../shared/types';
 import { useT } from './i18n';
+import { useModalFocus } from './useModalFocus';
 
 interface Props {
   /** `configured` is true once a valid model was saved. */
@@ -17,6 +18,7 @@ interface Props {
 
 export function OnboardingScreen({ onClose, onOpenAdvanced }: Props) {
   const t = useT();
+  const dialogRef = useModalFocus<HTMLDivElement>(() => onClose(false));
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('');
@@ -54,9 +56,16 @@ export function OnboardingScreen({ onClose, onOpenAdvanced }: Props) {
 
   return (
     <div class="settings-overlay">
-      <div class="settings-card onboarding-card">
+      <div
+        ref={dialogRef}
+        class="settings-card onboarding-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="onboarding-title"
+        tabIndex={-1}
+      >
         <div class="settings-header">
-          <strong>{t('onboarding.title')}</strong>
+          <strong id="onboarding-title">{t('onboarding.title')}</strong>
         </div>
 
         <p class="settings-note">{t('onboarding.intro')}</p>
@@ -65,6 +74,7 @@ export function OnboardingScreen({ onClose, onOpenAdvanced }: Props) {
           <span>{t('settings.endpointUrl')}</span>
           <input
             type="url"
+            autoFocus
             placeholder="https://api.example.com/v1"
             value={baseUrl}
             onInput={(e) => setBaseUrl((e.target as HTMLInputElement).value)}

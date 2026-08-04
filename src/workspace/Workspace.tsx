@@ -166,7 +166,7 @@ export function Workspace() {
 
   return (
     <div class="ws-root">
-      <header class="ws-header">
+      <header class="ws-header glass-surface">
         <span class="ws-title">CANChat Agent</span>
         <nav class="ws-nav">
           <button class={`ws-nav-btn ${view === 'chat' ? 'is-active' : ''}`} onClick={() => setView('chat')}>{t('workspace.nav.chat')}</button>
