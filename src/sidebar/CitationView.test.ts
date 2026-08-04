@@ -27,6 +27,15 @@ describe('CitationView', () => {
   });
 
   it('centers the highlighted sentence when opened and when the citation changes', () => {
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (
+      this: HTMLElement,
+      options?: FocusOptions,
+    ) {
+      // Browsers scroll focused descendants into view unless explicitly told
+      // not to, which would undo CitationView's preceding layout centering.
+      const view = this.closest<HTMLElement>('.citation-view');
+      if (!options?.preventScroll && view) view.scrollTop = 0;
+    });
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
       const top = this.classList.contains('citation-view-mark') ? 700 : 100;
       const height = this.classList.contains('citation-view-mark') ? 20 : 400;
@@ -44,6 +53,7 @@ describe('CitationView', () => {
     act(() => render(h(CitationView, { citation: citation('first:c0:s0#aaaaaa'), onClose: () => {} }), root));
     const view = root.querySelector<HTMLElement>('.citation-view');
     expect(view?.scrollTop).toBe(410);
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
 
     if (view) view.scrollTop = 0;
     act(() => render(h(CitationView, { citation: citation('second:c0:s0#bbbbbb'), onClose: () => {} }), root));

@@ -21,7 +21,7 @@ export function useModalFocus<T extends HTMLElement>(onClose: () => void) {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const focusable = () => Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => !el.hidden);
 
-    (dialog.querySelector<HTMLElement>('[autofocus]') ?? focusable()[0] ?? dialog).focus();
+    (dialog.querySelector<HTMLElement>('[autofocus]') ?? focusable()[0] ?? dialog).focus({ preventScroll: true });
 
     const onKeyDown = (event: KeyboardEvent) => {
       // Nested non-modal popovers own Escape while focus is inside them.
@@ -38,7 +38,7 @@ export function useModalFocus<T extends HTMLElement>(onClose: () => void) {
       const items = focusable();
       if (items.length === 0) {
         event.preventDefault();
-        dialog.focus();
+        dialog.focus({ preventScroll: true });
         return;
       }
       const first = items[0];
