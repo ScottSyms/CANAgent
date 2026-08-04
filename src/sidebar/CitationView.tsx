@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'preact/hooks';
 import type { Citation } from '../shared/types';
 
 /** Append `#page=N` for PDF deep-linking, unless the URL already carries a hash. */
@@ -18,9 +19,24 @@ export function CitationView({ citation, onClose }: { citation: Citation; onClos
   const before = chunkText.slice(0, start);
   const sentence = chunkText.slice(start, end);
   const after = chunkText.slice(end);
+  const viewRef = useRef<HTMLDivElement>(null);
+  const markRef = useRef<HTMLElement>(null);
+
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    const mark = markRef.current;
+    if (!view || !mark) return;
+    const viewRect = view.getBoundingClientRect();
+    const markRect = mark.getBoundingClientRect();
+    const target = view.scrollTop + markRect.top - viewRect.top - (view.clientHeight - markRect.height) / 2;
+    const maxScroll = Math.max(0, view.scrollHeight - view.clientHeight);
+    view.scrollTop = Math.min(Math.max(0, target), maxScroll);
+  }, [citation.sentenceId]);
+
   return (
     <div class="citation-view-backdrop" onClick={onClose}>
       <div
+        ref={viewRef}
         class="citation-view"
         role="dialog"
         aria-label="Citation source"
@@ -32,7 +48,7 @@ export function CitationView({ citation, onClose }: { citation: Citation; onClos
         </div>
         <p class="citation-view-chunk">
           {before}
-          <mark class="citation-view-mark">{sentence}</mark>
+          <mark ref={markRef} class="citation-view-mark">{sentence}</mark>
           {after}
         </p>
         <a

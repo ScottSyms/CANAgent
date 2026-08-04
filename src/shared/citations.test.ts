@@ -11,6 +11,14 @@ describe('extractCitationIds', () => {
   it('returns [] when there are no tokens', () => {
     expect(extractCitationIds('plain answer, no citations')).toEqual([]);
   });
+
+  it('extracts each id from a grouped model reference', () => {
+    const text = 'Claim [[web-337a04-15888c:c0:s34#ce761c], [web-eee3a6-17af11:c0:s10#3108b3]].';
+    expect(extractCitationIds(text)).toEqual([
+      'web-337a04-15888c:c0:s34#ce761c',
+      'web-eee3a6-17af11:c0:s10#3108b3',
+    ]);
+  });
 });
 
 describe('injectCitationChips', () => {
@@ -29,6 +37,17 @@ describe('injectCitationChips', () => {
 
   it('drops unknown tokens entirely (fabricated ids never render)', () => {
     expect(injectCitationChips('Bogus [[doc-9:c9:s9#zzz999]].', numberById)).toBe('Bogus .');
+  });
+
+  it('renders grouped references as individual validated chips', () => {
+    const out = injectCitationChips(
+      'Fact [[doc-1:c0:s0#aaa111], [doc-1:c0:s1#bbb222]].',
+      numberById,
+    );
+    expect(out.match(/citation-chip/g)).toHaveLength(2);
+    expect(out).toContain('>1</sup><sup');
+    expect(out).toContain('>2</sup>');
+    expect(out).not.toContain('[[');
   });
 });
 

@@ -106,7 +106,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: 'get_tab_content',
       description:
-        'Extract readable content from a tab: text, title, headings, links, and metadata. Use after navigation or search to read the resulting page.',
+        'Extract readable content from a tab: sentence-tagged text, title, headings, links, and metadata. Use after navigation or search to read the resulting page; cite returned [[sentence-id]] tokens inline.',
       parameters: { type: 'object', properties: { ...tabIdParam }, required: ['tabId'] },
     },
   },
@@ -115,7 +115,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: 'read_app_content',
       description:
-        'Best-effort read of content the normal page tools cannot see — e.g. a canvas-rendered Google Doc or Sheet body. Try this when get_tab_content returns little on an app page. If it also returns nothing, fall back to snapshot + vision.',
+        'Best-effort read of content the normal page tools cannot see — e.g. a canvas-rendered Google Doc or Sheet body. Returned text is sentence-tagged for inline citation. Try this when get_tab_content returns little; if it also returns nothing, use snapshot + vision.',
       parameters: { type: 'object', properties: { ...tabIdParam }, required: ['tabId'] },
     },
   },
@@ -139,7 +139,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: 'get_all_tab_contents',
       description:
-        'Extract readable content from every open tab. Requires the user to have granted all-tabs access; requires user approval each time.',
+        'Extract sentence-tagged readable content from every open tab for inline citation. Requires all-tabs access and user approval each time.',
       parameters: { type: 'object', properties: { ...reasonParam }, required: ['reason'] },
     },
   },
@@ -176,7 +176,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: 'read_tab_group',
       description:
-        "Read the content of every tab in a tab group. Omit name for this conversation's own group, or pass a group name the user mentioned (e.g. 'Wolf'). Returns each page's text — use it to summarize or compare the pages in a group.",
+        "Read every tab in a tab group. Omit name for this conversation's own group, or pass a mentioned group name (e.g. 'Wolf'). Returns each page's sentence-tagged text for cited summaries and comparisons.",
       parameters: {
         type: 'object',
         properties: {

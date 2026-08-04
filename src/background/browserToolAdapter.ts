@@ -471,7 +471,14 @@ export async function groupTitleTaken(name: string): Promise<boolean> {
   }
 }
 
-export async function readTabGroup(name: string | undefined, groupId: number | null): Promise<string> {
+export interface TabGroupReadResult {
+  error?: string;
+  group?: string;
+  count?: number;
+  results?: PageContent[];
+}
+
+export async function readTabGroup(name: string | undefined, groupId: number | null): Promise<TabGroupReadResult> {
   let targetId = groupId ?? undefined;
   if (name) {
     const lower = name.toLowerCase();
@@ -485,24 +492,18 @@ export async function readTabGroup(name: string | undefined, groupId: number | n
     }
   }
   if (targetId === undefined) {
-    return JSON.stringify({ error: `No tab group${name ? ` named "${name}"` : ''} found.` });
+    return { error: `No tab group${name ? ` named "${name}"` : ''} found.` };
   }
   const tabs = await chrome.tabs.query({ groupId: targetId });
-  if (tabs.length === 0) return JSON.stringify({ error: 'That tab group has no tabs.' });
+  if (tabs.length === 0) return { error: 'That tab group has no tabs.' };
   const results = await Promise.all(
     tabs.filter((t) => t.id !== undefined).map((t) => getTabContent(t.id!)),
   );
-  return JSON.stringify({
+  return {
     group: name,
     count: results.length,
-    results: results.map((c) => ({
-      tabId: c.tabId,
-      url: c.url,
-      title: c.title,
-      extractionStatus: c.extractionStatus,
-      text: c.text.slice(0, 6000),
-    })),
-  });
+    results,
+  };
 }
 
 export async function getElementMap(tabId: number): Promise<ElementRef[]> {

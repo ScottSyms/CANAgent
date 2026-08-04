@@ -100,7 +100,8 @@ import { resolveSentenceCitations } from './sentenceResolve';
 import { normalizeSlides } from '../shared/slides';
 import type { SearchHit } from '../shared/vectorSearch';
 import { assessRetrievalConfidence } from '../shared/retrievalConfidence';
-import { citationTokenRe } from '../shared/citations';
+import { citationIdsInReference, citationTokenRe } from '../shared/citations';
+import { citableWebSource } from '../shared/webCitations';
 import { ingestTab } from './repoIngest';
 import { getAccessToken } from './graphAuth';
 import { graphGet, graphPostJson } from './graphClient';
@@ -377,7 +378,7 @@ Working method:
 - Local repositories: the user can save pages into named on-device repositories (OPFS). Use add_to_repo to capture the current page or this conversation's tab group into a repo, and search_repo to retrieve relevant passages from a repo and answer from them. search_repo automatically fuses semantic, keyword, and fresh knowledge-graph evidence when available; prefer it for ordinary questions about saved pages. list_repos shows what exists.
 - For explicit graph-topology questions about how named entities connect, call search_graph; it returns a one-hop entity/relationship view with [[sentence-id]] evidence. Ordinary cross-document retrieval should start with search_repo because graph evidence is already fused there automatically.
 - For broad, corpus-level questions about a repository — "what are the main themes", "summarize this whole collection", "how does it all fit together" — call global_search on that repo: it returns up to five query-ranked graph communities with [[sentence-id]] evidence to synthesize across. Use search_repo/search_graph for specific facts; use global_search for the big picture.
-- search_repo passages are returned as sentences each prefixed with a [[sentence-id]] token. When a statement in your answer is supported by a retrieved sentence, cite it inline by copying that sentence's [[sentence-id]] token verbatim immediately after the statement (e.g. "Model selection is done at the application level [[doc-73:c42:s4#8f31ca]]."). Cite only ids that appear in the current search results — never invent, guess, or reuse an id from earlier; unresolved ids are removed automatically. This is in addition to the Source tabs list, not a replacement.
+- Repository and webpage read tools return sentences prefixed with [[sentence-id]] tokens. When a statement is supported by a retrieved sentence, cite it inline by copying that token verbatim immediately after the statement (e.g. "Model selection is done at the application level [[doc-73:c42:s4#8f31ca]]."). Cite only ids supplied by tools in the current task — never invent, guess, or reuse an earlier id; unresolved ids are removed automatically. search_web/open_url navigation metadata is not evidence: read a destination with get_tab_content before citing it. Inline citations are in addition to the Source tabs list, not a replacement.
 - The user can reference a repository (typing #) or a bookmarked page (typing @) in their message; when they do, an explicit instruction is attached — act on it directly: search_repo that exact repository, or open and read that exact URL rather than web-searching for it.
 - Endpoint-first Microsoft 365 rule: for Outlook mail, Outlook calendar, Teams meeting, SharePoint, and OneDrive retrieval, ALWAYS use the dedicated endpoint-backed tools before browser/page automation. Do not use search_web, open_url, get_tab_content, Outlook/Office web UI playbooks, or DOM automation for these data sources unless the endpoint tool returns an explicit endpoint/auth error. Mail, calendar, and draft creation are backed by Microsoft Graph (OAuth) and need a one-time Connect in Settings → Knowledge bases → Mailbox; SharePoint/OneDrive files remain a direct cookie-session call needing no separate connect step.
 - For questions about the user's own Microsoft 365 email AND/OR files, call microsoft365_search first — source ('mail'|'files'|'both'), from (sender), fileType, sitePath, editedByMe, since/until (YYYY-MM-DD), orderBy ('relevance'|'date'), top. For mail-only questions, set source:'mail'. Mail search matches on subject and sender substrings plus a date range — it does not search the message body, so a body-only phrase may miss; prefer read_office_document/read_pdf-style narrowing (recipient, subject keyword, date window) over a vague free-text query. For SharePoint/OneDrive file questions, assume the user wants the most recently modified content files unless they explicitly ask otherwise: omit orderBy or use orderBy:'date', and do not search for executables/components (the tool defaults to Office docs, PDFs, text/html, images, audio, and video unless a fileType is supplied). E.g. "last five emails from Brian Ray" → {source:'mail', from:'Brian Ray', orderBy:'date', top:5}; "the last Word file I edited on my SharePoint site" → {source:'files', fileType:'docx', editedByMe:true, top:1}. Cite each result's url. If the response has a mailError, explain that the mailbox isn't connected (or the connection expired) and ask the user to open Settings → Mailbox → Connect, then retry; only then may you fall back to the /search-mail skill or Outlook web UI. To read a file's full contents beyond its snippet, pass its url to read_office_document (Office) or read_pdf (PDFs) — do not navigate to it (that downloads it).
@@ -581,6 +582,7 @@ export class AgentRuntime {
   private repoSearchCache = new Map<string, string>();
   private repoEvidenceStatus: 'unknown' | 'strong' | 'weak' | 'empty' = 'unknown';
   private sourceNudgesDone = 0;
+  private webEvidenceRegistered = false;
   private canDistill = false;
   private lastUserText = '';
   private taskConversationStart = 0;
@@ -860,6 +862,7 @@ export class AgentRuntime {
     this.repoSearchCache.clear();
     this.repoEvidenceStatus = 'unknown';
     this.sourceNudgesDone = 0;
+    this.webEvidenceRegistered = false;
     this.setDistill(false);
     this.emit({ type: 'plan_update', plan: null });
     this.taskConversationStart = this.conversation.length;
@@ -1228,6 +1231,7 @@ export class AgentRuntime {
     this.repoSearchCache.clear();
     this.repoEvidenceStatus = 'unknown';
     this.sourceNudgesDone = 0;
+    this.webEvidenceRegistered = false;
     this.setDistill(false);
     this.emit({ type: 'plan_update', plan: this.planView() });
     this.taskConversationStart = this.conversation.length;
@@ -2191,25 +2195,27 @@ export class AgentRuntime {
       if (!reply.tool_calls || reply.tool_calls.length === 0) {
         if (!reply.content?.trim()) throw new LlmError('Model provider returned an empty final response.');
         let text = reply.content;
-        if (
+        const requiresRepoCitation =
           this.sourcePolicy.mode === 'repo_only' &&
           !this.sourcePolicy.webApproved &&
-          this.repoEvidenceStatus === 'strong' &&
-          this.resolveCitations(text).citations.length === 0
-        ) {
+          this.repoEvidenceStatus === 'strong';
+        const requiresWebCitation = this.webEvidenceRegistered;
+        if ((requiresRepoCitation || requiresWebCitation) && this.resolveCitations(text).citations.length === 0) {
           if (this.sourceNudgesDone < 1 && this.stepsUsed < this.stepBudget) {
             this.sourceNudgesDone++;
             this.conversation.push({ role: 'assistant', content: text });
             this.conversation.push({
               role: 'user',
               content:
-                'The repository contains strong evidence, but your draft has no validated repository citations. ' +
-                'Revise the answer using only the supplied passages and cite their [[sentence-id]] tokens. Do not use outside knowledge.',
+                'Your draft uses retrieved evidence but has no validated inline citations. Revise it and place the supplied ' +
+                '[[sentence-id]] tokens immediately after the claims they support. Cite only tokens from the current tool results.',
             });
-            this.notice('Requiring repository-grounded citations before answering.');
+            this.notice('Adding validated inline citations to the answer.');
             continue;
           }
-          text = 'I found relevant repository passages but could not produce a citation-grounded answer. Please retry the question.';
+          if (requiresRepoCitation) {
+            text = 'I found relevant repository passages but could not produce a citation-grounded answer. Please retry the question.';
+          }
         }
         // Plan-execution guard (deterministic, runs before the self-check): if the
         // model tries to finish while its plan is untouched (open steps, none done)
@@ -2999,8 +3005,15 @@ export class AgentRuntime {
         if (result.tabId > 0) await this.addToConversationGroup(result.tabId);
         return JSON.stringify({ ...result, group: this.groupName });
       }
-      case 'read_tab_group':
-        return browser.readTabGroup(args.name ? String(args.name) : undefined, this.groupId);
+      case 'read_tab_group': {
+        const group = await browser.readTabGroup(args.name ? String(args.name) : undefined, this.groupId);
+        if (group.error) return JSON.stringify({ error: group.error });
+        return JSON.stringify({
+          group: group.group,
+          count: group.count,
+          results: (group.results ?? []).map((content) => this.contentForModel(content, 6000)),
+        });
+      }
       case 'run_subtasks':
         return this.runScopedSubtasks(args);
       case 'add_to_repo':
@@ -3537,7 +3550,23 @@ export class AgentRuntime {
       case 'query_pointer_target':
         return browser.queryPointerTarget(tabId);
       case 'read_app_content':
-        return browser.readAppContent(tabId);
+      {
+        const raw = await browser.readAppContent(tabId);
+        try {
+          const result = JSON.parse(raw) as { method?: string; text?: string; truncated?: boolean; note?: string };
+          if (!result.text) return raw;
+          const tab = (await browser.listTabs()).find((item) => item.tabId === tabId);
+          const visibleText = result.text.slice(0, SINGLE_TAB_CHARS);
+          return JSON.stringify({
+            ...result,
+            text: tab?.url ? this.registerWebText(tab.title, tab.url, visibleText) : visibleText,
+            truncated: result.truncated || result.text.length > visibleText.length,
+            ...(tab ? { tabId, url: tab.url, title: tab.title } : {}),
+          });
+        } catch {
+          return raw;
+        }
+      }
       case 'capture_full_page': {
         const active = await browser.getActiveTab();
         const result = await captureFullPage(active.tabId, Number(args.maxFrames) || 12);
@@ -3887,13 +3916,17 @@ export class AgentRuntime {
     const citations: Citation[] = [];
     const seen = new Set<string>();
     const cleaned = text.replace(citationTokenRe(), (_whole, rawId: string) => {
-      const rec = this.citationRegistry.get(rawId.trim());
-      if (!rec) return ''; // fabricated / stale id — remove it
-      if (!seen.has(rec.sentenceId)) {
-        seen.add(rec.sentenceId);
-        citations.push(rec);
+      const validIds: string[] = [];
+      for (const id of citationIdsInReference(rawId)) {
+        const rec = this.citationRegistry.get(id);
+        if (!rec) continue; // fabricated / stale id — remove it
+        validIds.push(rec.sentenceId);
+        if (!seen.has(rec.sentenceId)) {
+          seen.add(rec.sentenceId);
+          citations.push(rec);
+        }
       }
-      return `[[${rec.sentenceId}]]`;
+      return validIds.map((id) => `[[${id}]]`).join(' ');
     });
     return { text: cleaned, citations };
   }
@@ -4174,7 +4207,7 @@ export class AgentRuntime {
     const parts = snapshot.tabs.map((t, i) => {
       const body =
         t.extractionStatus === 'ok' || t.extractionStatus === 'partial'
-          ? t.text.slice(0, perTab)
+          ? this.registerWebText(t.title, t.url, t.text.slice(0, perTab))
           : `(content unavailable: ${t.extractionStatus})`;
       return `[Tab ${i + 1}] tabId=${t.tabId} "${t.title}" ${t.url}\n${body}`;
     });
@@ -4186,15 +4219,27 @@ export class AgentRuntime {
   }
 
   private contentForModel(content: PageContent, maxChars: number): Record<string, unknown> {
+    const visibleText = content.text.slice(0, maxChars);
     return {
       tabId: content.tabId,
       url: content.url,
       title: content.title,
       extractionStatus: content.extractionStatus,
       headings: content.headings.slice(0, 20),
-      text: content.text.slice(0, maxChars),
+      text: this.registerWebText(content.title, content.url, visibleText),
       capturedAt: content.capturedAt,
     };
+  }
+
+  /** Register the exact model-visible webpage snapshot and return tagged text. */
+  private registerWebText(title: string, url: string, text: string): string {
+    if (!/^https?:\/\//i.test(url) || !text.trim()) return text;
+    const source = citableWebSource({ title, url, text });
+    for (const citation of source.citations) {
+      if (!this.citationRegistry.has(citation.sentenceId)) this.citationRegistry.set(citation.sentenceId, citation);
+    }
+    if (source.citations.length > 0) this.webEvidenceRegistered = true;
+    return source.taggedText;
   }
 
   private serializeContent(content: PageContent, maxChars: number): string {

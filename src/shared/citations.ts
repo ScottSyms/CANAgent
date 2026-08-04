@@ -8,21 +8,33 @@
 
 /** A fresh global-flagged matcher each call (avoids shared `lastIndex` bugs). */
 export function citationTokenRe(): RegExp {
-  return /\[\[([^[\]\r\n]+?)\]\]/g;
+  // Accept both [[id]] and the grouped form models sometimes emit:
+  // [[id], [id]]. IDs inside the reference are parsed and validated separately.
+  return /\[\[([^\r\n]*?)\]\]/g;
 }
 
 /** Ids we are willing to reflect into HTML attributes — defensive charset guard. */
 const SAFE_ID = /^[\w:#.\-]+$/;
+
+/** Parse individual ids from one normal or model-grouped citation reference. */
+export function citationIdsInReference(raw: string): string[] {
+  return raw
+    .replace(/\]\s*,?\s*\[/g, ',')
+    .split(',')
+    .map((part) => part.trim().replace(/^\[+|\]+$/g, '').trim())
+    .filter((id) => id.length > 0 && SAFE_ID.test(id));
+}
 
 /** The ordered, de-duplicated sentence ids cited via `[[id]]` tokens in `text`. */
 export function extractCitationIds(text: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const m of text.matchAll(citationTokenRe())) {
-    const id = m[1].trim();
-    if (id && !seen.has(id)) {
-      seen.add(id);
-      out.push(id);
+    for (const id of citationIdsInReference(m[1])) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        out.push(id);
+      }
     }
   }
   return out;
@@ -35,9 +47,11 @@ export function extractCitationIds(text: string): string[] {
  */
 export function injectCitationChips(html: string, numberById: Map<string, number>): string {
   return html.replace(citationTokenRe(), (_whole, rawId: string) => {
-    const id = rawId.trim();
-    const n = numberById.get(id);
-    if (!n || !SAFE_ID.test(id)) return '';
-    return `<sup class="citation-chip" data-cite-id="${id}" role="button" tabindex="0">${n}</sup>`;
+    return citationIdsInReference(rawId)
+      .map((id) => {
+        const n = numberById.get(id);
+        return n ? `<sup class="citation-chip" data-cite-id="${id}" role="button" tabindex="0">${n}</sup>` : '';
+      })
+      .join('');
   });
 }

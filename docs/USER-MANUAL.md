@@ -200,9 +200,10 @@ Try a request that needs the live web:
 
 > *"Search the web for the latest on <topic> and give me three sources."*
 
-The agent runs a search in a new tab, reads the results, and answers with a
-**Source tabs:** list of links. Tabs it opens are gathered into a **named tab
-group** for that conversation (e.g. *Loutre* or *Wolf*).
+The agent runs a search in a new tab, reads the results, and answers with
+sentence-level citation chips backed by the captured page text plus a **Source
+tabs:** list of links. Tabs it opens are gathered into a **named tab group** for
+that conversation (e.g. *Loutre* or *Wolf*).
 
 ---
 

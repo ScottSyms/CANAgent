@@ -448,6 +448,8 @@ export interface Citation {
   docName: string;
   /** Source URL (opened in a tab; `#page=N` appended when `page` is known). */
   url: string;
+  /** Provenance family. Absent on legacy repository citations. */
+  sourceKind?: 'repository' | 'web' | 'pdf' | 'office';
   /** 1-based page number, when the source format exposed one. */
   page?: number;
   /** The exact cited sentence (`chunkText.slice(start, end)`). */
