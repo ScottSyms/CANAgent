@@ -41,7 +41,7 @@ import {
   repoList,
 } from './offscreenClient';
 import { generateNotebookOverview, isOverviewStale } from './notebookOverview';
-import { buildRepoGraph } from './graphExtract';
+import { buildRepoGraph, getDocWindows } from './graphExtract';
 import { generateStudioOutput } from './studioOutputs';
 import { studioGet } from './offscreenClient';
 import { resolveSentenceCitations } from './sentenceResolve';
@@ -51,7 +51,7 @@ import type { DocGraph } from '../shared/docGraph';
 // Repos with a graph build currently in flight (in-memory; lost on SW eviction,
 // after which a build resumes from the checkpointed graph on the next request).
 const graphBuilding = new Map<string, AbortController>();
-import { ingestFile } from './repoIngest';
+import { ingestFilesBatch } from './repoIngest';
 import { indexMailbox, type MailSyncProgress } from './mailIngest';
 import {
   indexSharePointLibrary,
@@ -92,6 +92,7 @@ import { probeEnvironment } from './envProbe';
 import { applyDecay, MEMORY_NODE_CAP, pruneGraph } from '../shared/memoryGraph';
 import { memoryIndexRemove, memoryIndexUpsert } from './memoryIndex';
 import { getVaultState, vaultDecrypt, vaultEncrypt } from './vault';
+import { withSwKeepalive } from './swKeepalive';
 
 // ----- Mailbox auto-refresh (chrome.alarms, opt-in) -----
 //
@@ -453,11 +454,11 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     return true;
   }
   if (request.type === 'notebook_overview_generate') {
-    (async () => {
+    withSwKeepalive(async () => {
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
       return generateNotebookOverview(settings, request.repo);
-    })()
+    })
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
@@ -466,17 +467,31 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     (async () => {
       const [graphRes, docsRes] = await Promise.all([graphGet(request.repo), repoDocs(request.repo)]);
       const graph = (graphRes.ok ? graphRes.result : null) as DocGraph | null;
-      const docs = (docsRes.ok ? docsRes.result : []) as unknown[];
-      return { ok: true, graph, docCount: docs.length, building: graphBuilding.has(request.repo) };
+      const docs = (docsRes.ok ? docsRes.result : []) as Array<{ id: string; name: string }>;
+      return {
+        ok: true,
+        graph,
+        docCount: docs.length,
+        docs: docs.map((d) => ({ id: d.id, name: d.name })),
+        building: graphBuilding.has(request.repo),
+      };
     })()
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }
+  if (request.type === 'notebook_doc_windows') {
+    getDocWindows(request.repo, request.docId)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
   if (request.type === 'notebook_graph_build') {
-    // Kept-open channel keeps the SW alive during the build; the UI polls
-    // notebook_graph_get meanwhile for per-doc progress (checkpointed each doc).
-    (async () => {
+    // The UI polls notebook_graph_get meanwhile for per-doc progress
+    // (checkpointed each doc). withSwKeepalive keeps the SW's idle timer from
+    // firing mid-build — see swKeepalive.ts for why that's needed even with a
+    // kept-open response channel.
+    withSwKeepalive(async () => {
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
       if (graphBuilding.has(request.repo)) return { ok: false, error: 'A graph build is already running for this notebook.' };
@@ -491,7 +506,7 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
       } finally {
         graphBuilding.delete(request.repo);
       }
-    })()
+    })
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
@@ -514,11 +529,11 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     return true;
   }
   if (request.type === 'notebook_studio_generate') {
-    (async () => {
+    withSwKeepalive(async () => {
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
       return generateStudioOutput(settings, request.repo, request.kind);
-    })()
+    })
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
@@ -551,11 +566,8 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
       if (!settings) {
         return { ok: false, results: [], error: 'No model configured. Open Settings first.' };
       }
-      const results = [];
-      for (const file of request.files) {
-        const res = await ingestFile(settings, request.repo, file, request.kind ?? 'page');
-        results.push({ name: file.name, ok: res.ok, chunks: res.chunks, error: res.error });
-      }
+      const outcomes = await ingestFilesBatch(settings, request.repo, request.files, request.kind ?? 'page');
+      const results = request.files.map((file, i) => ({ name: file.name, ok: outcomes[i].ok, chunks: outcomes[i].chunks, error: outcomes[i].error }));
       return { ok: results.some((r) => r.ok), results };
     })().then(sendResponse);
     return true;
@@ -578,7 +590,7 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     return true;
   }
   if (request.type === 'index_sharepoint_library') {
-    (async () => {
+    withSwKeepalive(async () => {
       if (sharePointIndexBusy) return { ok: false, error: 'A SharePoint refresh is already running — try again shortly.' };
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
@@ -594,11 +606,11 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
       } finally {
         sharePointIndexBusy = false;
       }
-    })().then(sendResponse);
+    }).then(sendResponse);
     return true;
   }
   if (request.type === 'index_mailbox') {
-    (async () => {
+    withSwKeepalive(async () => {
       if (mailIndexBusy) return { ok: false, error: 'A mailbox refresh is already running — try again shortly.' };
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
@@ -625,7 +637,7 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
       } finally {
         mailIndexBusy = false;
       }
-    })().then(sendResponse);
+    }).then(sendResponse);
     return true;
   }
   if (request.type === 'memory_graph_get') {

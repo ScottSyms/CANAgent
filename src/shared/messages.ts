@@ -143,6 +143,10 @@ export type RuntimeRequest =
   // Resolve a graph node/edge's evidence sentence ids to full citations (source
   // doc + exact sentence text) for the graph UI's evidence panel.
   | { type: 'notebook_graph_evidence'; repo: string; sentenceIds: string[] }
+  // The exact sentence-tagged text of every extraction window for one document —
+  // i.e. what buildRepoGraph actually sent the model — for the graph UI's
+  // "view extracted text" diagnostic on a document (esp. a failed one).
+  | { type: 'notebook_doc_windows'; repo: string; docId: string }
   // Studio: read persisted outputs, or generate one (briefing/faq/study_guide).
   | { type: 'notebook_studio_get'; repo: string }
   | { type: 'notebook_studio_generate'; repo: string; kind: StudioKind }
@@ -297,8 +301,15 @@ export interface ExtractPdfResponse {
   text?: string;
   pageCount?: number;
   truncated?: boolean;
-  /** Full extracted length before any maxChars slice. */
+  /**
+   * Extracted length before any maxChars slice. Exact only when
+   * `charCountExact` is true — with a small `maxChars`, extraction stops
+   * early once past the limit, so this is a lower bound, not the document's
+   * true total.
+   */
   charCount?: number;
+  /** False when `charCount` is a lower bound (extraction stopped early at maxChars), not the document's true total. */
+  charCountExact?: boolean;
   error?: string;
 }
 
@@ -315,8 +326,15 @@ export interface ExtractOfficeResponse {
   text?: string;
   format?: 'docx' | 'pptx' | 'xlsx';
   truncated?: boolean;
-  /** Full extracted length before any maxChars slice. */
+  /**
+   * Extracted length before any maxChars slice. Exact only when
+   * `charCountExact` is true — with a small `maxChars`, extraction stops
+   * early once past the limit, so this is a lower bound, not the document's
+   * true total.
+   */
   charCount?: number;
+  /** False when `charCount` is a lower bound (extraction stopped early at maxChars), not the document's true total. */
+  charCountExact?: boolean;
   error?: string;
 }
 
@@ -403,6 +421,20 @@ export type RepoRequest =
     }
   | {
       target: 'offscreen-repo';
+      op: 'addBatch';
+      repo: string;
+      docs: Array<{
+        doc: { name: string; url: string };
+        chunks: string[];
+        vectors: number[][];
+        docExtra?: { path?: string; mtime?: number; size?: number };
+        docId?: string;
+      }>;
+      embedModel?: string;
+      kind?: RepoKind;
+    }
+  | {
+      target: 'offscreen-repo';
       op: 'search';
       repo: string;
       queryVector: number[];
@@ -435,6 +467,10 @@ export type RepoRequest =
   // fetch one doc's sentence-tagged chunks for extraction.
   | { target: 'offscreen-repo'; op: 'graphSnapshot'; repo: string }
   | { target: 'offscreen-repo'; op: 'graphGet'; repo: string }
+  // Same as 'graphGet' but without the staleness gate -- buildRepoGraph uses
+  // this to resume incremental progress on top of the actual stored graph,
+  // even when it's behind the repo's current corpusRevision.
+  | { target: 'offscreen-repo'; op: 'graphGetRaw'; repo: string }
   | { target: 'offscreen-repo'; op: 'graphSet'; repo: string; graph: DocGraph; expectedRevision: number }
   | { target: 'offscreen-repo'; op: 'docChunks'; repo: string; docId: string }
   // Notebook studio outputs (briefing / FAQ / study guide), persisted per repo.

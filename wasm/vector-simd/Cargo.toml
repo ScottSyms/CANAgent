@@ -1,0 +1,16 @@
+[package]
+name = "vector-simd"
+version = "0.1.0"
+edition = "2021"
+description = "Batch int8 x f32 dot-product kernel for CANChat Agent's on-device vector search."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true

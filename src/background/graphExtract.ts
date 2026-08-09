@@ -8,7 +8,7 @@
 // `processedDocIds` and is checkpointed after every document, so a service-worker
 // eviction mid-build resumes by skipping already-processed docs on the next run.
 
-import type { CitableSentence } from '../shared/sentenceSplit';
+import { shortHash, type CitableSentence } from '../shared/sentenceSplit';
 import type { Settings } from '../shared/types';
 import type { LlmMessage } from './llmProvider';
 import { complete, resolveModelForRole } from './llmProvider';
@@ -27,7 +27,7 @@ import {
   type DocGraph,
 } from '../shared/docGraph';
 import { detectCommunities, renderCommunityForModel } from '../shared/graphCommunities';
-import { docChunks, graphGet, graphSet, graphSnapshot } from './offscreenClient';
+import { docChunks, graphGetRaw, graphSet, graphSnapshot } from './offscreenClient';
 import { resolvePrompt } from '../shared/promptDefaults';
 
 const PER_DOC_BUDGET_CHARS = 12000;
@@ -105,6 +105,32 @@ export function tagDocChunks(
   budget = PER_DOC_BUDGET_CHARS,
 ): { text: string; validIds: Set<string> } {
   return windowDocChunks(chunks, budget, 1)[0];
+}
+
+export interface DocWindowsResult {
+  windows: Array<{ text: string; charCount: number; sentenceCount: number }>;
+}
+
+/**
+ * The exact sentence-tagged text of every extraction window for one document —
+ * i.e. exactly what `buildRepoGraph` sends the model, in the same order and at
+ * the same window indices `graph.docCoverage[docId]` refers to (both call
+ * `windowDocChunks` the same way, with `maxWindows = Infinity`, so window N
+ * here is window N there). Lets the graph UI show a user precisely what was
+ * (or wasn't) extracted from, instead of a bare "the model found nothing" reason.
+ */
+export async function getDocWindows(repo: string, docId: string): Promise<{ ok: true; result: DocWindowsResult } | { ok: false; error: string }> {
+  const chunksRes = await docChunks(repo, docId);
+  if (!chunksRes.ok) return { ok: false, error: chunksRes.error || 'Could not read document chunks.' };
+  const chunks = (chunksRes.result ?? []) as Array<{ text: string; sentences: CitableSentence[] }>;
+  if (chunks.length === 0) return { ok: false, error: 'No chunks found for this document.' };
+  const windows = windowDocChunks(chunks, PER_DOC_BUDGET_CHARS, Number.POSITIVE_INFINITY);
+  return {
+    ok: true,
+    result: {
+      windows: windows.map((w) => ({ text: w.text, charCount: w.text.length, sentenceCount: w.validIds.size })),
+    },
+  };
 }
 
 export type ExtractOutcome =
@@ -289,7 +315,13 @@ export async function buildRepoGraph(
 
   let graph = emptyDocGraph();
   if (!opts.rebuild) {
-    const existing = await graphGet(repo);
+    // Deliberately the *raw*, staleness-ungated read: this resumes the
+    // incremental build (docCoverage, nodes, edges) on top of whatever graph
+    // actually exists, even if it's behind the repo's current corpusRevision
+    // (true any time a document was added/removed since it was last built).
+    // Reading through the gated graphGet here would make every rebuild after
+    // any corpus change silently discard all prior extraction work.
+    const existing = await graphGetRaw(repo);
     if (!existing.ok) return { ok: false, error: existing.error };
     if (existing.result) graph = existing.result as DocGraph;
   }
@@ -323,16 +355,26 @@ export async function buildRepoGraph(
       continue;
     }
     const chunks = (chunksRes.result ?? []) as Array<{ text: string; sentences: CitableSentence[] }>;
+    // Content identity (not window count, which drifts with incidental
+    // re-extraction/re-chunking) gates whether prior progress is trusted.
+    const contentHash = shortHash(chunks.map((c) => c.text).join('\n'));
     const windows = windowDocChunks(chunks, PER_DOC_BUDGET_CHARS, Number.POSITIVE_INFINITY);
     const allIndices = windows.map((_, index) => index);
     const targets = mode === 'full' || graph.coverageMode === 'full'
       ? allIndices
       : evenlySpacedIndices(windows.length, MAX_WINDOWS_PER_DOC);
     const previous = graph.docCoverage[doc.id];
-    const coverage: GraphDocCoverage = previous && previous.totalWindows === windows.length
+    const contentUnchanged = previous?.contentHash !== undefined && previous.contentHash === contentHash;
+    const coverage: GraphDocCoverage = contentUnchanged
       ? previous
-      : { totalWindows: windows.length, selectedWindows: [], completedWindows: [], failedWindows: [] };
-    coverage.selectedWindows = targets;
+      : { totalWindows: windows.length, selectedWindows: [], completedWindows: [], failedWindows: [], contentHash };
+    coverage.totalWindows = windows.length;
+    coverage.contentHash = contentHash;
+    // Union, not overwrite: a narrower (quick) sample must never erase memory
+    // of windows a broader (full) build previously targeted — including ones
+    // that failed — or a document can get marked complete/processed while a
+    // window outside the current sample was never actually resolved.
+    coverage.selectedWindows = Array.from(new Set([...coverage.selectedWindows, ...targets])).sort((a, b) => a - b);
     coverage.completedWindows = coverage.completedWindows.filter((index) => index < windows.length);
     coverage.failedWindows = coverage.failedWindows.filter((index) => index < windows.length);
     graph.docCoverage[doc.id] = coverage;
@@ -385,6 +427,15 @@ export async function buildRepoGraph(
           const outcome = await extractOneDoc(settings, window.text, window.validIds, opts.signal);
           if (outcome.ok) {
             mergeExtraction(graph, outcome.extraction, item.doc.id, { markProcessed: false });
+            if (!item.coverage.completedWindows.includes(windowIndex)) item.coverage.completedWindows.push(windowIndex);
+            item.coverage.failedWindows = item.coverage.failedWindows.filter((index) => index !== windowIndex);
+          } else if (outcome.reason === 'empty') {
+            // A valid, complete response with nothing to extract (e.g. a
+            // references/qualification-table-only window) is not a failure —
+            // completing it as-is stops one boilerplate window from dragging
+            // an otherwise-successful document into the failed bucket. See
+            // extractOneDoc's own doc comment: "callers decide how to treat
+            // each" outcome reason.
             if (!item.coverage.completedWindows.includes(windowIndex)) item.coverage.completedWindows.push(windowIndex);
             item.coverage.failedWindows = item.coverage.failedWindows.filter((index) => index !== windowIndex);
           } else {

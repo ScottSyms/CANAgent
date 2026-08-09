@@ -70,6 +70,7 @@ const EN: Dict = {
   'chat.stop': 'Stop',
   'chat.copy': '⧉ Copy',
   'chat.copied': '✓ Copied',
+  'chat.loadEarlier': 'Load earlier messages ({n} hidden)',
   // approval card
   'approval.title': 'Approve action?',
   'approval.tech': 'Technical detail',
@@ -515,6 +516,7 @@ const FR: Dict = {
   'chat.stop': 'Arrêter',
   'chat.copy': '⧉ Copier',
   'chat.copied': '✓ Copié',
+  'chat.loadEarlier': 'Charger les messages précédents ({n} masqué(s))',
   // carte d’approbation
   'approval.title': 'Approuver l’action?',
   'approval.tech': 'Détail technique',

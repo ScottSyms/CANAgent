@@ -2543,11 +2543,18 @@ export class AgentRuntime {
     return out;
   }
 
-  /** Rough char count of a message's content (string or multimodal parts). */
+  /**
+   * Rough char count of a message's content (string or multimodal parts).
+   * Image parts are weighted by their actual data-URL length (a captured page
+   * frame is a multi-KB/MB base64 string), not a flat placeholder — a flat
+   * weight would let captured-image messages silently balloon the real
+   * conversation size past `CONVERSATION_CHAR_BUDGET` without the budget ever
+   * noticing, since `compactConversation` only sees this count.
+   */
   private static messageLen(m: LlmMessage): number {
     if (typeof m.content === 'string') return m.content.length;
     if (Array.isArray(m.content)) {
-      return m.content.reduce((n, p) => n + (p.type === 'text' ? p.text.length : 1200), 0);
+      return m.content.reduce((n, p) => n + (p.type === 'text' ? p.text.length : p.image_url.url.length), 0);
     }
     return 0;
   }
@@ -2555,25 +2562,36 @@ export class AgentRuntime {
   // Placeholder left in place of an evicted tool output we don't (or can't)
   // summarize; its prefix is also the marker that a message was already evicted.
   private static readonly COMPACT_PLACEHOLDER = '[compacted — important results are in Findings]';
+  // Placeholder for evicted image (full-page capture) messages: the images
+  // already served their purpose earlier in the turn, so they're dropped
+  // outright rather than summarized.
+  private static readonly COMPACT_IMAGE_PLACEHOLDER =
+    '[compacted — earlier captured page frame(s) removed to save context]';
   // Only outputs bigger than this are worth a summarization call; tinier ones
   // just get the placeholder.
   private static readonly SUMMARIZE_MIN_CHARS = 1500;
 
   /**
    * Keep the conversation under `CONVERSATION_CHAR_BUDGET` by evicting the
-   * oldest, bulkiest tool outputs. With `summarizeObservations` on (default), the
-   * larger evicted outputs are replaced by a cheap LLM digest that preserves
-   * their salient facts/URLs; otherwise (or on any summarizer failure) they get a
-   * short static placeholder. Safe either way because the plan + findings are
+   * oldest, bulkiest tool outputs and image (full-page capture) messages. With
+   * `summarizeObservations` on (default), the larger evicted tool outputs are
+   * replaced by a cheap LLM digest that preserves their salient facts/URLs;
+   * otherwise (or on any summarizer failure) they get a short static
+   * placeholder. Evicted image messages are always just dropped (see
+   * COMPACT_IMAGE_PLACEHOLDER) — a stale screenshot doesn't gain anything from
+   * being summarized. Safe either way because the plan + findings are
    * re-injected every step in the working-state block, and the most recent few
-   * messages are left intact so the model retains immediate context.
+   * messages are left intact so the model retains immediate context (including
+   * the most recent capture, if any).
    */
   private async compactConversation(settings: Settings): Promise<void> {
     let total = this.conversation.reduce((n, m) => n + AgentRuntime.messageLen(m), 0);
     if (total <= CONVERSATION_CHAR_BUDGET) return;
     const protectedTail = 6; // leave the most recent messages intact
-    // Pick the oldest not-yet-evicted tool outputs, in order, until back under budget.
+    // Pick the oldest not-yet-evicted tool outputs and image messages, in
+    // order, until back under budget.
     const victims: number[] = [];
+    const imageVictims: number[] = [];
     for (let i = 1; i < this.conversation.length - protectedTail && total > CONVERSATION_CHAR_BUDGET; i++) {
       const m = this.conversation[i];
       if (
@@ -2584,9 +2602,16 @@ export class AgentRuntime {
       ) {
         victims.push(i);
         total -= m.content.length - AgentRuntime.COMPACT_PLACEHOLDER.length;
+      } else if (m.role === 'user' && Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url')) {
+        imageVictims.push(i);
+        total -= AgentRuntime.messageLen(m) - AgentRuntime.COMPACT_IMAGE_PLACEHOLDER.length;
       }
     }
-    if (victims.length === 0) return;
+    if (victims.length === 0 && imageVictims.length === 0) return;
+
+    for (const i of imageVictims) {
+      this.conversation[i].content = [{ type: 'text', text: AgentRuntime.COMPACT_IMAGE_PLACEHOLDER }];
+    }
 
     // Summarize the worthwhile (large) victims in one batched call; tiny ones and
     // any we couldn't summarize fall back to the static placeholder.

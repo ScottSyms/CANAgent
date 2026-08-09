@@ -9,13 +9,13 @@
 // =============================================================================
 
 import { chunkText } from '../shared/repoChunk';
-import type { RepoKind } from '../shared/messages';
+import type { RepoKind, UploadFile } from '../shared/messages';
 import type { Settings } from '../shared/types';
 import { resolveOfficeUrl, resolvePdfUrl } from '../shared/url';
 import * as browser from './browserToolAdapter';
 import { captureFullPage } from './fullPageCapture';
 import { complete, embedChunks, embedderId, resolveModelForRole, type ContentPart } from './llmProvider';
-import { extractOffice, extractPdf, repoAdd } from './offscreenClient';
+import { extractOffice, extractPdf, repoAdd, repoAddBatch } from './offscreenClient';
 
 // OCR fallback: screenshot the whole (active) tab and have the vision model
 // transcribe it. Only works for the active tab (captureVisibleTab limitation).
@@ -100,6 +100,22 @@ export async function ingestTab(
   return storeText(settings, repo, title || url, url, text);
 }
 
+/** Chunk + embed text, without storing it — the shared prep step for both the
+ * single-document (`storeText`) and batched (`ingestFilesBatch`) store paths. */
+async function prepareTextDoc(
+  settings: Settings,
+  text: string,
+): Promise<{ ok: true; chunks: string[]; vectors: number[][] } | { ok: false; error: string }> {
+  const chunks = chunkText(text);
+  if (chunks.length === 0) return { ok: false, error: 'No chunks produced.' };
+  try {
+    const vectors = await embedChunks(settings, chunks);
+    return { ok: true, chunks, vectors };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
 /** Chunk → embed → store text as a repo document. Shared by tab and file ingestion. */
 export async function storeText(
   settings: Settings,
@@ -109,34 +125,20 @@ export async function storeText(
   text: string,
   opts: { kind?: RepoKind; docExtra?: { path?: string; mtime?: number; size?: number } } = {},
 ): Promise<IngestResult> {
-  const chunks = chunkText(text);
-  if (chunks.length === 0) return { ok: false, error: 'No chunks produced.' };
-  let vectors: number[][];
-  try {
-    vectors = await embedChunks(settings, chunks);
-  } catch (e) {
-    return { ok: false, error: String(e) };
-  }
-  const res = await repoAdd(repo, { name, url }, chunks, vectors, {
+  const prepared = await prepareTextDoc(settings, text);
+  if (!prepared.ok) return prepared;
+  const res = await repoAdd(repo, { name, url }, prepared.chunks, prepared.vectors, {
     embedModel: embedderId(settings),
     kind: opts.kind,
     docExtra: opts.docExtra,
   });
   if (!res.ok) return { ok: false, error: res.error };
-  return { ok: true, chunks: chunks.length };
+  return { ok: true, chunks: prepared.chunks.length };
 }
 
-/**
- * Ingest an uploaded file into a repository. Text-like files arrive with their
- * text already read in the UI; PDF/Office files arrive as a data URL the
- * offscreen extractor (pdf.js / OOXML) parses — the same path used for tabs.
- */
-export async function ingestFile(
-  settings: Settings,
-  repo: string,
-  file: { name: string; kind: 'text' | 'pdf' | 'office'; text?: string; dataUrl?: string; path?: string; mtime?: number; size?: number },
-  repoKind: RepoKind = 'page',
-): Promise<IngestResult> {
+/** The text-extraction ladder shared by `ingestFile` and `ingestFilesBatch`: use the
+ * file's own text if present, otherwise run it through the offscreen PDF/Office extractor. */
+async function extractFileText(file: UploadFile): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   let text = (file.text ?? '').trim();
   try {
     if (!text && file.kind === 'pdf' && file.dataUrl) {
@@ -152,13 +154,89 @@ export async function ingestFile(
     return { ok: false, error: String(e) };
   }
   if (text.length < 1) return { ok: false, error: 'No extractable text in the file.' };
+  return { ok: true, text };
+}
+
+/**
+ * Ingest an uploaded file into a repository. Text-like files arrive with their
+ * text already read in the UI; PDF/Office files arrive as a data URL the
+ * offscreen extractor (pdf.js / OOXML) parses — the same path used for tabs.
+ */
+export async function ingestFile(
+  settings: Settings,
+  repo: string,
+  file: UploadFile,
+  repoKind: RepoKind = 'page',
+): Promise<IngestResult> {
+  const extracted = await extractFileText(file);
+  if (!extracted.ok) return extracted;
   // Folder docs keep their relative path as both the display name and url so the
   // agent can cite the file, and as the incremental-sync key in DocMeta.
   const path = file.path;
   const name = path || file.name;
   const url = `file:///${path || file.name}`;
-  return storeText(settings, repo, name, url, text, {
+  return storeText(settings, repo, name, url, extracted.text, {
     kind: repoKind,
     docExtra: { path, mtime: file.mtime, size: file.size },
   });
+}
+
+/**
+ * Ingest several uploaded files into a repository with a single store write:
+ * each file is extracted + chunked + embedded individually (unavoidable —
+ * different text, different embedding calls), but instead of calling
+ * `repoAdd` once per file (an O(N²) sequence of full chunks.json/keyword-index
+ * rewrites over a folder sync, see repoStore.repoAddBatch), every successfully
+ * prepared file is stored in one `repoAddBatch` call. Returns one `IngestResult`
+ * per input file, in the same order.
+ */
+export async function ingestFilesBatch(
+  settings: Settings,
+  repo: string,
+  files: UploadFile[],
+  repoKind: RepoKind = 'page',
+): Promise<IngestResult[]> {
+  const results = new Array<IngestResult>(files.length);
+  const batchEntries: Array<{ index: number; doc: { name: string; url: string }; chunks: string[]; vectors: number[][]; docExtra: { path?: string; mtime?: number; size?: number } }> = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const extracted = await extractFileText(file);
+    if (!extracted.ok) {
+      results[i] = extracted;
+      continue;
+    }
+    const prepared = await prepareTextDoc(settings, extracted.text);
+    if (!prepared.ok) {
+      results[i] = prepared;
+      continue;
+    }
+    const path = file.path;
+    batchEntries.push({
+      index: i,
+      doc: { name: path || file.name, url: `file:///${path || file.name}` },
+      chunks: prepared.chunks,
+      vectors: prepared.vectors,
+      docExtra: { path, mtime: file.mtime, size: file.size },
+    });
+  }
+
+  if (batchEntries.length > 0) {
+    const res = await repoAddBatch(
+      repo,
+      batchEntries.map((e) => ({ doc: e.doc, chunks: e.chunks, vectors: e.vectors, docExtra: e.docExtra })),
+      { embedModel: embedderId(settings), kind: repoKind },
+    );
+    const outcomes = res.ok && Array.isArray(res.result) ? (res.result as Array<{ ok: true; docId: string; chunkCount: number } | { ok: false; error: string }>) : null;
+    batchEntries.forEach((entry, j) => {
+      if (!res.ok) {
+        results[entry.index] = { ok: false, error: res.error ?? 'Batch store failed.' };
+        return;
+      }
+      const outcome = outcomes?.[j];
+      results[entry.index] = outcome?.ok ? { ok: true, chunks: entry.chunks.length } : { ok: false, error: outcome && !outcome.ok ? outcome.error : 'Batch store failed.' };
+    });
+  }
+
+  return results;
 }

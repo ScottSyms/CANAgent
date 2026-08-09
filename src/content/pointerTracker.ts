@@ -193,6 +193,12 @@ function currentElementFromPoint(state: PointerState): Element | null {
 }
 
 function refresh(state: PointerState): void {
+  // updateOverlay() itself no-ops (hides the overlay/banner) whenever Alt
+  // isn't held, but currentElementFromPoint() forces a synchronous layout/
+  // hit-test — checking here avoids paying for that on every scroll/resize
+  // event on every page for the (overwhelming majority of) time nobody is
+  // actively picking an element.
+  if (!state.active || !state.altDown) return;
   updateOverlay(state, currentElementFromPoint(state));
 }
 

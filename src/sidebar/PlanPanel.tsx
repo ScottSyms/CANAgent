@@ -1,3 +1,4 @@
+import { memo } from 'preact/compat';
 import type { PlanStepStatus, PlanView } from '../shared/types';
 import { useT } from './i18n';
 
@@ -8,7 +9,7 @@ const STATUS_ICON: Record<PlanStepStatus, string> = {
   skipped: '–',
 };
 
-export function PlanPanel({ plan }: { plan: PlanView | null }) {
+export const PlanPanel = memo(function PlanPanel({ plan }: { plan: PlanView | null }) {
   const t = useT();
   if (!plan || plan.steps.length === 0) return null;
   const done = plan.steps.filter((s) => s.status === 'done').length;
@@ -27,4 +28,4 @@ export function PlanPanel({ plan }: { plan: PlanView | null }) {
       </ul>
     </div>
   );
-}
+});

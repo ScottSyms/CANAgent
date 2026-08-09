@@ -682,6 +682,12 @@ body {
   line-height: 1.5;
 }
 
+.chat-load-earlier {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 6px;
+}
+
 .msg {
   max-width: 92%;
   padding: 9px 12px;
@@ -907,6 +913,49 @@ body {
 }
 .citation-view-link:hover {
   text-decoration: underline;
+}
+
+.doc-windows-view {
+  max-height: 80%;
+}
+.doc-window {
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.doc-window:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+.doc-window-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.doc-window-status {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border: 1px solid;
+  border-radius: 999px;
+}
+.doc-window-text {
+  margin: 0;
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
 }
 
 .msg-actions {

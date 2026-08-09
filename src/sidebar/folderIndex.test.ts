@@ -49,10 +49,13 @@ describe('syncFolderFiles incremental sync', () => {
       { file: fakeFile('new.md', 'root/new.md', 100, 10), path: 'root/new.md' },
     ];
 
-    const sent: Array<{ type: string; docId?: string; kind?: string; files?: Array<{ path?: string }> }> = [];
+    const sent: Array<{ type: string; docId?: string; kind?: string; files?: Array<{ name: string; path?: string }> }> = [];
     const sendMessage = vi.fn(async (msg: { type: string; [k: string]: unknown }) => {
       sent.push(msg as never);
-      if (msg.type === 'add_files_to_repo') return { ok: true, results: [{ name: 'x', ok: true }] };
+      if (msg.type === 'add_files_to_repo') {
+        const files = (msg.files as Array<{ name: string }>) ?? [];
+        return { ok: true, results: files.map((f) => ({ name: f.name, ok: true })) };
+      }
       return { ok: true };
     });
     vi.stubGlobal('chrome', { runtime: { sendMessage } });
@@ -90,8 +93,10 @@ describe('syncFolderFiles incremental sync', () => {
       { file: fakeFile('ok.md', 'root/ok.md', 1, 10), path: 'root/ok.md' },
     ];
 
-    const sendMessage = vi.fn(async (msg: { type: string }) =>
-      msg.type === 'add_files_to_repo' ? { ok: true, results: [{ name: 'x', ok: true }] } : { ok: true },
+    const sendMessage = vi.fn(async (msg: { type: string; files?: Array<{ name: string }> }) =>
+      msg.type === 'add_files_to_repo'
+        ? { ok: true, results: (msg.files ?? []).map((f) => ({ name: f.name, ok: true })) }
+        : { ok: true },
     );
     vi.stubGlobal('chrome', { runtime: { sendMessage } });
 

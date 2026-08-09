@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CommunitySummary, DocGraph, GraphEdge, GraphNode } from '../shared/docGraph';
 import type { Citation } from '../shared/types';
 import { CitationView } from './CitationView';
+import { DocWindowsView } from './DocWindowsView';
 
 // The per-notebook knowledge graph: a Build/Rebuild control with live progress, a
 // radial concept map (nodes colored by theme), the extracted themes (graph
@@ -12,6 +13,7 @@ interface GetResponse {
   ok: boolean;
   graph: DocGraph | null;
   docCount: number;
+  docs: Array<{ id: string; name: string }>;
   building: boolean;
 }
 interface BuildResponse {
@@ -70,6 +72,7 @@ const colorForIndex = (i: number | undefined) => (i === undefined ? 'var(--accen
 export function GraphPanel({ repo }: { repo: string }) {
   const [graph, setGraph] = useState<DocGraph | null>(null);
   const [docCount, setDocCount] = useState(0);
+  const [docs, setDocs] = useState<Array<{ id: string; name: string }>>([]);
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -78,6 +81,7 @@ export function GraphPanel({ repo }: { repo: string }) {
   const [evidence, setEvidence] = useState<Citation[]>([]);
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
   const [entityQuery, setEntityQuery] = useState('');
+  const [viewingDocId, setViewingDocId] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
   const refresh = async () => {
@@ -85,6 +89,7 @@ export function GraphPanel({ repo }: { repo: string }) {
       const res = (await chrome.runtime.sendMessage({ type: 'notebook_graph_get', repo })) as GetResponse;
       setGraph(res?.graph ?? null);
       setDocCount(res?.docCount ?? 0);
+      setDocs(res?.docs ?? []);
       setBuilding(!!res?.building);
       return res;
     } catch {
@@ -152,6 +157,7 @@ export function GraphPanel({ repo }: { repo: string }) {
   const processed = graph?.processedDocIds.length ?? 0;
   const failedIds = graph?.failedDocIds ?? [];
   const docErrors = graph?.docErrors ?? {};
+  const docNameById = new Map(docs.map((d) => [d.id, d.name]));
   const nodeCount = graph?.nodes.length ?? 0;
   const edgeCount = graph?.edges.length ?? 0;
   const communities = graph?.communities ?? [];
@@ -162,6 +168,7 @@ export function GraphPanel({ repo }: { repo: string }) {
     0,
   );
   const totalWindows = coverage.reduce((sum, item) => sum + item.totalWindows, 0);
+  const pendingWindows = selectedWindows - completedWindows;
   const view = graph ? layout(graph) : null;
   const comIdx = graph ? communityIndex(graph) : new Map<string, number>();
   const matchingNodes = graph
@@ -232,11 +239,29 @@ export function GraphPanel({ repo }: { repo: string }) {
           <ul style={{ margin: '4px 0 0', paddingLeft: '18px' }}>
             {failedIds.map((id) => (
               <li key={id} class="settings-note" style={{ fontSize: '12px' }}>
-                {id}: {docErrors[id] ?? 'unknown error'}
+                <button
+                  class="link-btn"
+                  style={{ font: 'inherit', padding: 0 }}
+                  onClick={() => setViewingDocId(id)}
+                  title="View the exact text sent for extraction"
+                >
+                  {docNameById.get(id) ?? id}
+                </button>
+                : {docErrors[id] ?? 'unknown error'}
               </li>
             ))}
           </ul>
         </details>
+      )}
+
+      {viewingDocId && (
+        <DocWindowsView
+          repo={repo}
+          docId={viewingDocId}
+          docName={docNameById.get(viewingDocId) ?? viewingDocId}
+          coverage={graph?.docCoverage?.[viewingDocId]}
+          onClose={() => setViewingDocId(null)}
+        />
       )}
 
       {view && nodeCount > 0 && (
@@ -246,6 +271,7 @@ export function GraphPanel({ repo }: { repo: string }) {
             {processed < docCount ? ` · ${processed}/${docCount} docs processed` : ''}
             {graph?.coverageMode ? ` · ${graph.coverageMode} coverage` : ' · legacy coverage'}
             {totalWindows > selectedWindows ? ` · ${selectedWindows}/${totalWindows} windows selected` : ''}
+            {pendingWindows > 0 ? ` · ${pendingWindows} window(s) pending` : ''}
           </p>
           <p class="settings-note">Concept map shows {Math.min(MAP_NODES, nodeCount)} of {nodeCount} entities, ranked by connectivity.</p>
           <svg

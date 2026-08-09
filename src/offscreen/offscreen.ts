@@ -33,6 +33,7 @@ import type {
 } from '../shared/messages';
 import {
   repoAdd,
+  repoAddBatch,
   repoDelete,
   repoDeleteDoc,
   repoDocs,
@@ -42,6 +43,7 @@ import {
   repoImportOne,
   repoDocChunks,
   repoGraphGet,
+  repoGraphGetRaw,
   repoGraphSnapshot,
   repoGraphSet,
   repoList,
@@ -53,8 +55,17 @@ import {
   repoStudioSet,
 } from './repoStore';
 import { productDelete, productExportAll, productGet, productImportAll, productList, productSave } from './productStore';
+import { initVectorSimd, simdDotBatch } from './vectorSimd';
+import { setSimdBackend } from '../shared/vectorSearch';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+
+// Load the WASM dot-product kernel in the background; scoreVectors keeps using
+// its JS fallback until (and unless) this resolves true. Never blocks offscreen
+// document startup.
+void initVectorSimd().then((ok) => {
+  if (ok) setSimdBackend(simdDotBatch);
+});
 
 // Anti-OOM ceiling on total extracted text (~hundreds of pages). Callers that
 // need a smaller, context-budget slice pass `maxChars`.
@@ -91,26 +102,34 @@ async function extractPdf(url: string, maxChars?: number): Promise<ExtractPdfRes
       isEvalSupported: false, // required under MV3 CSP
       disableFontFace: true,
     } as unknown as Parameters<typeof pdfjs.getDocument>[0]).promise;
+    // Stop extracting once we've got enough for the caller's own limit (e.g.
+    // read_pdf's ~60k-char context cap), not just the anti-OOM SAFETY_MAX —
+    // otherwise a small maxChars request on a huge PDF still runs pdf.js text
+    // extraction over every page for text that's immediately discarded.
+    const limit = maxChars ?? SAFETY_MAX;
     let text = '';
-    let hitSafety = false;
+    let scannedFully = true;
     for (let p = 1; p <= doc.numPages; p++) {
       const page = await doc.getPage(p);
       const content = await page.getTextContent();
       text += pageItemsToText(content.items as Array<{ str?: string; hasEOL?: boolean }>) + '\n\n';
-      if (text.length > SAFETY_MAX) {
-        hitSafety = true;
+      if (text.length > limit) {
+        scannedFully = false;
         break;
       }
     }
     text = text.trim();
     const charCount = text.length;
-    const limit = maxChars ?? SAFETY_MAX;
-    const truncated = hitSafety || charCount > limit;
+    const truncated = !scannedFully || charCount > limit;
     return {
       ok: true,
       pageCount: doc.numPages,
       truncated,
       charCount,
+      // Only meaningful when the whole document was scanned (not stopped
+      // early at a caller-supplied maxChars) — otherwise charCount is a lower
+      // bound, not the document's true total.
+      charCountExact: scannedFully,
       text: charCount > limit ? text.slice(0, limit).trim() : text,
     };
   } catch (e) {
@@ -186,10 +205,11 @@ function csvEscape(v: string): string {
   return /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
 }
 
-function extractDocx(files: ZipFiles): string {
+function extractDocx(files: ZipFiles, limit = Infinity): string {
   const doc = parseXml(files['word/document.xml']);
   const paras = doc.getElementsByTagName('w:p');
   const lines: string[] = [];
+  let total = 0;
   for (let i = 0; i < paras.length; i++) {
     // Walk descendants in document order so tabs/breaks land in the right place.
     const nodes = paras[i].getElementsByTagName('*');
@@ -201,11 +221,16 @@ function extractDocx(files: ZipFiles): string {
       else if (tag === 'w:br' || tag === 'w:cr') line += '\n';
     }
     lines.push(line);
+    total += line.length + 1;
+    // Once we're well past the caller's limit, stop walking the remaining
+    // paragraphs — a large doc requested with a small maxChars (e.g. read_
+    // office_document's ~60k-char cap) shouldn't pay for the whole document.
+    if (total > limit) break;
   }
   return lines.join('\n');
 }
 
-function extractPptx(files: ZipFiles): string {
+function extractPptx(files: ZipFiles, limit = Infinity): string {
   const slideNum = (n: string) => Number(/slide(\d+)\.xml$/.exec(n)?.[1] ?? '0');
   const notesNum = (n: string) => Number(/notesSlide(\d+)\.xml$/.exec(n)?.[1] ?? '0');
   // Concatenate all a:t runs under a part as readable lines.
@@ -230,17 +255,19 @@ function extractPptx(files: ZipFiles): string {
     if (/^ppt\/notesSlides\/notesSlide\d+\.xml$/.test(n)) notesByNum.set(notesNum(n), textLines(n));
   }
   const out: string[] = [];
-  slides.forEach((name, idx) => {
-    const lines = textLines(name);
+  let total = 0;
+  for (let idx = 0; idx < slides.length && total <= limit; idx++) {
+    const lines = textLines(slides[idx]);
     const notes = notesByNum.get(idx + 1) ?? [];
     let block = `--- Slide ${idx + 1} ---\n${lines.join('\n')}`.trim();
     if (notes.length) block += `\n[Speaker notes] ${notes.join(' ')}`;
     out.push(block);
-  });
+    total += block.length + 2;
+  }
   return out.join('\n\n');
 }
 
-function extractXlsx(files: ZipFiles): string {
+function extractXlsx(files: ZipFiles, limit = Infinity): string {
   // Shared-string table: cells with t="s" index into this.
   const shared: string[] = [];
   if (files['xl/sharedStrings.xml']) {
@@ -263,7 +290,8 @@ function extractXlsx(files: ZipFiles): string {
   }
   const sheetEls = parseXml(files['xl/workbook.xml']).getElementsByTagName('sheet');
   const out: string[] = [];
-  for (let i = 0; i < sheetEls.length; i++) {
+  let total = 0;
+  for (let i = 0; i < sheetEls.length && total <= limit; i++) {
     const name = sheetEls[i].getAttribute('name') || `Sheet${i + 1}`;
     const rid = sheetEls[i].getAttribute('r:id') || '';
     let target = relMap[rid] || `worksheets/sheet${i + 1}.xml`;
@@ -271,14 +299,17 @@ function extractXlsx(files: ZipFiles): string {
     if (!target.startsWith('xl/')) target = `xl/${target}`;
     const bytes = files[target] || files[`xl/worksheets/sheet${i + 1}.xml`];
     if (!bytes) continue;
-    out.push(`# ${name}\n${sheetToCsv(parseXml(bytes), shared)}`);
+    const csv = sheetToCsv(parseXml(bytes), shared, limit - total);
+    out.push(`# ${name}\n${csv}`);
+    total += csv.length + 2;
   }
   return out.join('\n\n');
 }
 
-function sheetToCsv(doc: Document, shared: string[]): string {
+function sheetToCsv(doc: Document, shared: string[], limit = Infinity): string {
   const rows = doc.getElementsByTagName('row');
   const lines: string[] = [];
+  let total = 0;
   for (let i = 0; i < rows.length; i++) {
     const cells = rows[i].getElementsByTagName('c');
     const vals: string[] = [];
@@ -296,7 +327,10 @@ function sheetToCsv(doc: Document, shared: string[]): string {
       }
       vals.push(csvEscape(v));
     }
-    lines.push(vals.join(','));
+    const line = vals.join(',');
+    lines.push(line);
+    total += line.length + 1;
+    if (total > limit) break;
   }
   return lines.join('\n');
 }
@@ -349,17 +383,20 @@ async function extractOffice(url: string, maxChars?: number): Promise<ExtractOff
   if (!format) {
     return { ok: false, error: 'Unrecognized Office file (only .docx, .pptx, .xlsx are supported).' };
   }
+  // Give the extractors some headroom past the raw char limit (formatting
+  // chars like joins/headers get trimmed below) before we ask them to stop
+  // walking the document — same anti-OOM ceiling as PDF when uncapped.
+  const limit = maxChars ?? SAFETY_MAX;
   let text: string;
   try {
-    text = format === 'docx' ? extractDocx(files) : format === 'pptx' ? extractPptx(files) : extractXlsx(files);
+    text = format === 'docx' ? extractDocx(files, limit) : format === 'pptx' ? extractPptx(files, limit) : extractXlsx(files, limit);
   } catch (e) {
     return { ok: false, error: `Could not parse the ${format} file: ${String(e)}` };
   }
   text = text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   const charCount = text.length;
-  const limit = maxChars ?? SAFETY_MAX;
   const truncated = charCount > limit;
-  return { ok: true, format, charCount, truncated, text: truncated ? text.slice(0, limit).trim() : text };
+  return { ok: true, format, charCount, truncated, charCountExact: maxChars === undefined, text: truncated ? text.slice(0, limit).trim() : text };
 }
 
 chrome.runtime.onMessage.addListener((message: ExtractOfficeRequest, _sender, sendResponse) => {
@@ -381,6 +418,8 @@ async function handleRepo(req: RepoRequest): Promise<RepoResponse> {
             docId: req.docId,
           }),
         };
+      case 'addBatch':
+        return { ok: true, result: await repoAddBatch(req.repo, req.docs, { embedModel: req.embedModel, kind: req.kind }) };
       case 'search':
         return {
           ok: true,
@@ -420,6 +459,8 @@ async function handleRepo(req: RepoRequest): Promise<RepoResponse> {
         return { ok: true, result: await repoGraphSnapshot(req.repo) };
       case 'graphGet':
         return { ok: true, result: await repoGraphGet(req.repo) };
+      case 'graphGetRaw':
+        return { ok: true, result: await repoGraphGetRaw(req.repo) };
       case 'graphSet':
         await repoGraphSet(req.repo, req.graph, req.expectedRevision);
         return { ok: true };

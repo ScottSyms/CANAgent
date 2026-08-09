@@ -5,6 +5,7 @@ import {
   repoDocChunks,
   repoExportOne,
   repoGraphGet,
+  repoGraphGetRaw,
   repoGraphSnapshot,
   repoGraphSet,
   repoImportOne,
@@ -215,6 +216,29 @@ describe('document graph', () => {
     expect(await repoGraphGet('r')).toBeNull();
   });
 
+  it('repoGraphGetRaw returns a stale graph that repoGraphGet correctly refuses (for resuming a build)', async () => {
+    // Regression test: buildRepoGraph used to resume via repoGraphGet (the
+    // staleness-gated getter meant for live search/UI use) -- so the moment a
+    // graph fell behind the repo's current corpusRevision (true as soon as
+    // any document is added/removed since it was built), buildRepoGraph saw
+    // null and silently discarded all prior nodes/edges/docCoverage on the
+    // very next rebuild, even though the data was sitting right there.
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    const g = emptyDocGraph();
+    mergeExtraction(g, { entities: [{ label: 'SSC', type: 'org', summary: 's', evidence: ['x'] }], relations: [] }, 'doc-1');
+    await repoGraphSet('r', g, 1);
+
+    // Adding another document bumps corpusRevision to 2 without deleting the
+    // graph (see the repoAdd fix above) -- the graph, still stamped at
+    // revision 1, is now genuinely stale relative to the repo's meta.
+    await repoAdd('r', { name: 'b', url: 'file:///b' }, ['world'], [vec(8, 2)]);
+
+    expect(await repoGraphGet('r')).toBeNull(); // correct: refuse stale data for live use
+    const raw = await repoGraphGetRaw('r');
+    expect(raw?.nodes.map((n) => n.label)).toEqual(['SSC']); // correct: still resumable
+    expect(raw?.corpusRevision).toBe(1);
+  });
+
   it('fuses fresh graph evidence into ordinary hybrid repository search', async () => {
     const { docId } = await repoAdd(
       'r',
@@ -275,20 +299,36 @@ describe('document graph', () => {
     expect(stale.diagnostics.graphStatus).toBe('stale_graph');
   });
 
-  it('increments corpus revisions and invalidates graph and Studio outputs after an add', async () => {
+  it('increments corpus revisions after an add without deleting the existing graph/Studio outputs', async () => {
+    // Regression test: repoAdd used to delete graph.json/studio.json outright
+    // on every add (invalidateGraphArtifacts), destroying prior extraction
+    // work the moment one more document was added -- even though
+    // buildRepoGraph's own per-document coverage tracking already handles a
+    // new/changed document incrementally. The graph/studio file must survive
+    // an add; only repoGraphGet/repoStudioGet's own staleness gate (still
+    // enforced, unchanged) should refuse to serve it live until rebuilt.
     await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
     expect((await repoGraphSnapshot('r')).corpusRevision).toBe(1);
 
     const graph = emptyDocGraph();
     mergeExtraction(graph, { entities: [{ label: 'A', type: 'x', summary: 's', evidence: ['s1'] }], relations: [] }, 'doc-1');
     await repoGraphSet('r', graph, 1);
-    await repoStudioSet('r', { outputs: {} }, 1);
+    await repoStudioSet('r', {
+      outputs: { briefing: { kind: 'briefing', title: 'B', markdown: '# B', citations: [], generatedAt: '2026-01-01T00:00:00.000Z' } },
+    }, 1);
 
     await repoAdd('r', { name: 'b', url: 'file:///b' }, ['world'], [vec(8, 2)], { embedModel: 'local:minilm' });
 
     expect((await repoGraphSnapshot('r')).corpusRevision).toBe(2);
+    // Live-use getters still correctly refuse a graph/studio that's now
+    // behind the repo's current revision -- unchanged, and still correct.
     expect(await repoGraphGet('r')).toBeNull();
     expect(await repoStudioGet('r')).toEqual({ outputs: {} });
+    // But the underlying files were NOT deleted: an archive export still
+    // captures them, and a future build can resume from them incrementally.
+    const exported = await repoExportOne('r');
+    expect((exported?.graph as { nodes: Array<{ label: string }> } | undefined)?.nodes[0].label).toBe('A');
+    expect((exported?.studio as { outputs: { briefing?: { title: string } } } | undefined)?.outputs.briefing?.title).toBe('B');
   });
 
   it('rejects a graph checkpoint from an older corpus revision', async () => {
@@ -401,6 +441,49 @@ describe('repoExportOne and repoImportOne', () => {
     const searchRes = await repoSearch('Imported Repo', vec(8, 1), 5);
     expect(searchRes.results).toHaveLength(1);
     expect(searchRes.results[0].text).toBe('Content chunk text.');
+  });
+
+  it('still exports a stale graph/studio (corpusRevision behind the current one), not silently dropped', async () => {
+    // Regression test: repoExportOne used to gate graph/studio inclusion on
+    // storedGraph.corpusRevision === corpusRevision(meta) -- so any time that
+    // invariant doesn't hold (e.g. an archive imported into an environment
+    // whose revision bookkeeping has since diverged), every subsequent "Save
+    // Archive" would silently exclude the graph/studio the user had already
+    // generated, with no warning. An archive exists to preserve generated
+    // work; staleness is already detected at use time elsewhere (repoSearch,
+    // repoGraphGet, GraphPanel), so export must not drop it.
+    await repoAdd('Stale Repo', { name: 'doc1.md', url: 'file:///doc1.md' }, ['Content chunk text.'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    const graph = emptyDocGraph();
+    mergeExtraction(graph, { entities: [{ label: 'Stale entity', type: 'x', summary: 's', evidence: ['s1'] }], relations: [] }, 'doc-1');
+    await repoGraphSet('Stale Repo', graph, 1);
+    await repoStudioSet('Stale Repo', {
+      outputs: { briefing: { kind: 'briefing', title: 'Stale briefing', markdown: '# B', citations: [], generatedAt: '2026-01-01T00:00:00.000Z' } },
+    }, 1);
+
+    // Reimport under a new name with the meta's corpusRevision bumped ahead of
+    // the graph/studio's -- repoImportOne (unlike repoAdd) writes exactly what
+    // an archive contains, so this reproduces "graph/studio present on disk but
+    // behind the repo's current revision" without relying on any particular
+    // internal call sequence.
+    const exported = await repoExportOne('Stale Repo');
+    (exported!.meta as { corpusRevision?: number }).corpusRevision = 2;
+    await repoImportOne(exported!, 'Stale Repo Imported');
+
+    const reExported = await repoExportOne('Stale Repo Imported');
+    expect((reExported?.meta as { corpusRevision?: number }).corpusRevision).toBe(2);
+    expect((reExported?.graph as { corpusRevision?: number } | undefined)?.corpusRevision).toBe(1);
+    expect((reExported?.studio as { corpusRevision?: number } | undefined)?.corpusRevision).toBe(1);
+    expect((reExported?.graph as { nodes: unknown[] } | undefined)?.nodes).toHaveLength(1);
+
+    const impRes = await repoImportOne(reExported!, 'Stale Repo Reimported');
+    expect(impRes.ok).toBe(true);
+    // repoGraphGet/repoStudioGet intentionally keep their own staleness gate
+    // (using a stale graph for live search citations would be a real
+    // correctness problem, unlike archiving it) -- verify via export instead,
+    // which is the archive path this test is about.
+    const reReExported = await repoExportOne('Stale Repo Reimported');
+    expect((reReExported?.graph as { nodes: Array<{ label: string }> } | undefined)?.nodes[0].label).toBe('Stale entity');
+    expect((reReExported?.studio as { outputs: { briefing?: { title: string } } } | undefined)?.outputs.briefing?.title).toBe('Stale briefing');
   });
 
   it('loads a legacy archive whose metadata and graph predate corpus revisions', async () => {

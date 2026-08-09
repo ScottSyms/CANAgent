@@ -175,6 +175,12 @@ export function Sidebar() {
     }
   }, []);
 
+  // Stable identities so memo(ChatPanel) can actually bail out on unrelated
+  // Sidebar re-renders — an inline arrow function here would be a new
+  // reference every render and defeat the memoization.
+  const clearRestoreDraft = useCallback(() => setRestoreDraft(null), []);
+  const clearPendingDrop = useCallback(() => setPendingDrop(null), []);
+
   useEffect(() => {
     chrome.storage.local.get('ba_settings').then((r) => {
       const s = r.ba_settings as Settings | undefined;
@@ -187,7 +193,23 @@ export function Sidebar() {
     });
 
     let port: chrome.runtime.Port;
-    let pingTimer: ReturnType<typeof setInterval>;
+    let pingTimer: ReturnType<typeof setInterval> | undefined;
+
+    // Keepalive ping so the service worker survives long-running tasks. Only
+    // runs while a task is actually active — pinging during idle browsing
+    // would permanently defeat MV3's service-worker idle eviction for as long
+    // as the sidebar happens to be open, which is most of a session.
+    const startPing = () => {
+      if (pingTimer) return;
+      pingTimer = setInterval(() => port.postMessage({ type: 'ping' }), 20000);
+    };
+    const stopPing = () => {
+      if (pingTimer) {
+        clearInterval(pingTimer);
+        pingTimer = undefined;
+      }
+    };
+    const syncPing = (status: AgentStatus) => (status === 'idle' ? stopPing() : startPing());
 
     const connect = () => {
       port = chrome.runtime.connect({ name: 'sidebar' });
@@ -207,6 +229,7 @@ export function Sidebar() {
             setPlan(event.plan);
             setCanDistill(event.canDistill);
             setCanUndo(event.canUndo);
+            syncPing(event.status);
             break;
           case 'chat_message':
             setMessages((m) => [...m, event.message]);
@@ -218,6 +241,7 @@ export function Sidebar() {
               setApproval(null);
               setPermissionNotice(null);
             }
+            syncPing(event.status);
             break;
           case 'tool_activity':
             setActivities((a) => {
@@ -264,12 +288,10 @@ export function Sidebar() {
       });
       port.onDisconnect.addListener(() => {
         portRef.current = null;
+        stopPing();
         // Service worker restarted; reconnect after a beat.
         setTimeout(connect, 500);
       });
-      // Keepalive ping so the service worker survives long waits.
-      clearInterval(pingTimer);
-      pingTimer = setInterval(() => port.postMessage({ type: 'ping' }), 20000);
     };
 
     const onStorageChanged = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
@@ -535,9 +557,9 @@ export function Sidebar() {
         pendingSnapshots={pendingSnapshots}
         canDistill={canDistill}
         restoreDraft={restoreDraft}
-        onRestoreConsumed={() => setRestoreDraft(null)}
+        onRestoreConsumed={clearRestoreDraft}
         droppedItems={pendingDrop}
-        onDroppedItemsConsumed={() => setPendingDrop(null)}
+        onDroppedItemsConsumed={clearPendingDrop}
         send={send}
         disabled={configured === false}
       />

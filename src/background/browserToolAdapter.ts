@@ -764,7 +764,11 @@ export async function readPdf(tabId: number | undefined, url: string | undefined
     charCount: result.charCount,
     truncated: result.truncated,
     note: result.truncated
-      ? `Only the first ~${READ_PDF_CONTEXT_CHARS.toLocaleString()} characters are shown (full document is ${result.charCount?.toLocaleString()} chars). To search the entire PDF, ingest it with add_to_repo and query it with search_repo.`
+      ? `Only the first ~${READ_PDF_CONTEXT_CHARS.toLocaleString()} characters are shown (${
+          result.charCountExact === false
+            ? `the document has more than ${result.charCount?.toLocaleString()} chars`
+            : `full document is ${result.charCount?.toLocaleString()} chars`
+        }). To search the entire PDF, ingest it with add_to_repo and query it with search_repo.`
       : undefined,
     text: result.text,
   });
@@ -803,7 +807,11 @@ export async function readOfficeDocument(
     charCount: result.charCount,
     truncated: result.truncated,
     note: result.truncated
-      ? `Only the first ~${READ_DOC_CONTEXT_CHARS.toLocaleString()} characters are shown (full document is ${result.charCount?.toLocaleString()} chars). To search the entire document, ingest it with add_to_repo and query it with search_repo.`
+      ? `Only the first ~${READ_DOC_CONTEXT_CHARS.toLocaleString()} characters are shown (${
+          result.charCountExact === false
+            ? `the document has more than ${result.charCount?.toLocaleString()} chars`
+            : `full document is ${result.charCount?.toLocaleString()} chars`
+        }). To search the entire document, ingest it with add_to_repo and query it with search_repo.`
       : undefined,
     text: result.text,
   });

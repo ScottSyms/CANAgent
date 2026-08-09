@@ -221,6 +221,27 @@ export function repoAdd(
   return repoRequest({ target: 'offscreen-repo', op: 'add', repo, doc, chunks, vectors, ...opts });
 }
 
+/**
+ * Add multiple documents in one round trip: the offscreen store reads/rewrites
+ * `chunks.json`/`keywordIndex.json`/`meta.json` once for the whole batch
+ * instead of once per document (see repoStore.repoAddBatch). Use this instead
+ * of calling `repoAdd` in a loop whenever more than one document is ready to
+ * store at once (e.g. a folder sync batch).
+ */
+export function repoAddBatch(
+  repo: string,
+  docs: Array<{
+    doc: { name: string; url: string };
+    chunks: string[];
+    vectors: number[][];
+    docExtra?: { path?: string; mtime?: number; size?: number };
+    docId?: string;
+  }>,
+  opts: { embedModel?: string; kind?: RepoKind } = {},
+): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'addBatch', repo, docs, ...opts });
+}
+
 export function repoSearch(
   repo: string,
   queryVector: number[],
@@ -289,6 +310,11 @@ export function notebookSample(repo: string, maxChunks?: number): Promise<RepoRe
 
 export function graphGet(repo: string): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'graphGet', repo });
+}
+
+/** Same as graphGet, but without the staleness gate -- see repoGraphGetRaw. */
+export function graphGetRaw(repo: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'graphGetRaw', repo });
 }
 
 export function graphSnapshot(repo: string): Promise<RepoResponse> {

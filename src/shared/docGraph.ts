@@ -51,12 +51,25 @@ export type GraphCoverageMode = 'quick' | 'full';
 export interface GraphDocCoverage {
   /** Number of extraction windows in the complete document. */
   totalWindows: number;
-  /** Window indices selected by the most recent quick/full build. */
+  /** Union of every window index any build has ever targeted for this doc
+   * (not just the most recent build's sample) — so a narrower quick-mode
+   * sample can never erase memory of windows a broader full-mode build
+   * previously targeted (including ones that failed). */
   selectedWindows: number[];
   /** Successfully extracted window indices, checkpointed individually. */
   completedWindows: number[];
   /** Failed window indices; retried by later builds. */
   failedWindows: number[];
+  /**
+   * shortHash() of this doc's concatenated chunk text when this coverage was
+   * last established. Gates whether completedWindows/failedWindows are
+   * trusted (content unchanged) or reset (content changed/never hashed).
+   * Absent on coverage records written before this field existed — treated
+   * as "no signal, assume changed" so a legacy record gets exactly one clean
+   * re-hash + possible reprocess, not a crash or a silent trust of stale
+   * progress.
+   */
+  contentHash?: string;
 }
 
 export interface DocGraph {

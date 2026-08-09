@@ -8,12 +8,12 @@ vi.mock('./llmProvider', () => ({
   resolveModelForRole: (settings: unknown, role: unknown) => resolveModelForRole(settings, role),
 }));
 const graphSnapshot = vi.fn();
-const graphGet = vi.fn();
+const graphGetRaw = vi.fn();
 const graphSet = vi.fn();
 const docChunks = vi.fn();
 vi.mock('./offscreenClient', () => ({
   graphSnapshot: (...a: unknown[]) => graphSnapshot(...a),
-  graphGet: (...a: unknown[]) => graphGet(...a),
+  graphGetRaw: (...a: unknown[]) => graphGetRaw(...a),
   graphSet: (...a: unknown[]) => graphSet(...a),
   docChunks: (...a: unknown[]) => docChunks(...a),
 }));
@@ -28,13 +28,14 @@ import {
   windowDocChunks,
 } from './graphExtract';
 import { emptyDocGraph, mergeExtraction } from '../shared/docGraph';
+import { shortHash } from '../shared/sentenceSplit';
 import type { Settings } from '../shared/types';
 
 afterEach(() => {
   complete.mockReset();
   resolveModelForRole.mockClear();
   graphSnapshot.mockReset();
-  graphGet.mockReset();
+  graphGetRaw.mockReset();
   graphSet.mockReset();
   docChunks.mockReset();
 });
@@ -266,7 +267,7 @@ describe('buildRepoGraph corpus revision', () => {
       ok: true,
       result: { docs: [{ id: 'doc-1', name: 'a.md' }], corpusRevision: 4 },
     });
-    graphGet.mockResolvedValue({ ok: true, result: null });
+    graphGetRaw.mockResolvedValue({ ok: true, result: null });
     docChunks.mockResolvedValue({
       ok: true,
       result: [{ text: 'A fact.', sentences: [{ id: 'doc-1:c0:s0#a', start: 0, end: 7 }] }],
@@ -300,7 +301,7 @@ describe('buildRepoGraph coverage', () => {
       ok: true,
       result: { docs: [{ id: 'b', name: 'B.md' }, { id: 'a', name: 'A.md' }], corpusRevision: 1 },
     });
-    graphGet.mockResolvedValue({ ok: true, result: null });
+    graphGetRaw.mockResolvedValue({ ok: true, result: null });
     docChunks.mockImplementation(async (_repo: string, id: string) => ({ ok: true, result: longDoc(id) }));
     graphSet.mockResolvedValue({ ok: true });
     complete.mockImplementation(async (_settings: unknown, messages: Array<{ content: string }>) => {
@@ -323,14 +324,17 @@ describe('buildRepoGraph coverage', () => {
     expect(result.warnings?.join(' ')).toContain('Full Coverage');
   });
 
-  it('full mode resumes legacy/partial coverage and processes every remaining window', async () => {
+  it('full mode reprocesses a document once when its stored coverage predates content hashing', async () => {
+    // No contentHash on the seeded coverage: a legacy record. No signal means
+    // "assume changed" -- the whole document reprocesses once, and a hash is
+    // stamped afterward so the *next* build can trust it (see the following test).
     const existing = emptyDocGraph();
     existing.corpusRevision = 2;
     existing.docCoverage = {
       a: { totalWindows: 3, selectedWindows: [0], completedWindows: [0], failedWindows: [] },
     };
     graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [{ id: 'a', name: 'A.md' }], corpusRevision: 2 } });
-    graphGet.mockResolvedValue({ ok: true, result: existing });
+    graphGetRaw.mockResolvedValue({ ok: true, result: existing });
     docChunks.mockResolvedValue({ ok: true, result: longDoc('a', 3) });
     graphSet.mockResolvedValue({ ok: true });
     complete.mockImplementation(async (_settings: unknown, messages: Array<{ content: string }>) => {
@@ -340,17 +344,163 @@ describe('buildRepoGraph coverage', () => {
 
     const result = await buildRepoGraph(S, 'repo', { mode: 'full' });
 
-    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete).toHaveBeenCalledTimes(3);
+    expect(result.graph?.docCoverage?.a.completedWindows.sort()).toEqual([0, 1, 2]);
+    expect(result.graph?.docCoverage?.a.selectedWindows).toEqual([0, 1, 2]);
+    expect(result.graph?.docCoverage?.a.contentHash).toBeDefined();
+    expect(result.graph?.coverageMode).toBe('full');
+    expect(result.graph?.processedDocIds).toEqual(['a']);
+  });
+
+  it('full mode resumes coverage with a matching content hash and only processes remaining windows', async () => {
+    const chunks = longDoc('a', 3);
+    const contentHash = shortHash(chunks.map((c) => c.text).join('\n'));
+    const existing = emptyDocGraph();
+    existing.corpusRevision = 2;
+    existing.docCoverage = {
+      a: { totalWindows: 3, selectedWindows: [0], completedWindows: [0], failedWindows: [], contentHash },
+    };
+    graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [{ id: 'a', name: 'A.md' }], corpusRevision: 2 } });
+    graphGetRaw.mockResolvedValue({ ok: true, result: existing });
+    docChunks.mockResolvedValue({ ok: true, result: chunks });
+    graphSet.mockResolvedValue({ ok: true });
+    complete.mockImplementation(async (_settings: unknown, messages: Array<{ content: string }>) => {
+      const id = messages[1].content.match(/^\[\[([^\]]+)\]\]/)?.[1] ?? 'missing';
+      return { content: JSON.stringify({ entities: [{ label: id, type: 'fact', summary: id, evidence: [id] }], relations: [] }) };
+    });
+
+    const result = await buildRepoGraph(S, 'repo', { mode: 'full' });
+
+    expect(complete).toHaveBeenCalledTimes(2); // only the 2 remaining windows; window 0 was already completed
     expect(result.graph?.docCoverage?.a.completedWindows.sort()).toEqual([0, 1, 2]);
     expect(result.graph?.docCoverage?.a.selectedWindows).toEqual([0, 1, 2]);
     expect(result.graph?.coverageMode).toBe('full');
     expect(result.graph?.processedDocIds).toEqual(['a']);
   });
 
+  it('does not re-attempt a document whose content hash matches stored coverage (cache hit)', async () => {
+    const chunks = longDoc('a', 3);
+    const contentHash = shortHash(chunks.map((c) => c.text).join('\n'));
+    const existing = emptyDocGraph();
+    existing.corpusRevision = 1;
+    existing.docCoverage = {
+      a: { totalWindows: 3, selectedWindows: [0, 1, 2], completedWindows: [0, 1, 2], failedWindows: [], contentHash },
+    };
+    existing.processedDocIds = ['a'];
+    graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [{ id: 'a', name: 'A.md' }], corpusRevision: 1 } });
+    graphGetRaw.mockResolvedValue({ ok: true, result: existing });
+    docChunks.mockResolvedValue({ ok: true, result: chunks });
+    graphSet.mockResolvedValue({ ok: true });
+
+    const result = await buildRepoGraph(S, 'repo', { mode: 'full' });
+
+    expect(complete).not.toHaveBeenCalled();
+    expect(result.graph?.docCoverage?.a.completedWindows.sort()).toEqual([0, 1, 2]);
+    expect(result.graph?.processedDocIds).toEqual(['a']);
+  });
+
+  it('reprocesses a document when its content actually changed since the last build (cache miss)', async () => {
+    const chunks = longDoc('a', 3);
+    const existing = emptyDocGraph();
+    existing.corpusRevision = 1;
+    existing.docCoverage = {
+      a: { totalWindows: 3, selectedWindows: [0, 1, 2], completedWindows: [0, 1, 2], failedWindows: [], contentHash: 'ffffff' },
+    };
+    existing.processedDocIds = ['a'];
+    graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [{ id: 'a', name: 'A.md' }], corpusRevision: 1 } });
+    graphGetRaw.mockResolvedValue({ ok: true, result: existing });
+    docChunks.mockResolvedValue({ ok: true, result: chunks });
+    graphSet.mockResolvedValue({ ok: true });
+    complete.mockImplementation(async (_settings: unknown, messages: Array<{ content: string }>) => {
+      const id = messages[1].content.match(/^\[\[([^\]]+)\]\]/)?.[1] ?? 'missing';
+      return { content: JSON.stringify({ entities: [{ label: id, type: 'fact', summary: id, evidence: [id] }], relations: [] }) };
+    });
+
+    const result = await buildRepoGraph(S, 'repo', { mode: 'full' });
+
+    expect(complete).toHaveBeenCalledTimes(3);
+    expect(result.graph?.docCoverage?.a.contentHash).toBe(shortHash(chunks.map((c) => c.text).join('\n')));
+    expect(result.graph?.docCoverage?.a.completedWindows.sort()).toEqual([0, 1, 2]);
+    expect(result.graph?.processedDocIds).toEqual(['a']);
+  });
+
+  it('quick mode does not forget a window that failed outside its sample in a prior full-mode attempt', async () => {
+    const chunks = longDoc('a', 8);
+    const contentHash = shortHash(chunks.map((c) => c.text).join('\n'));
+    const existing = emptyDocGraph();
+    existing.corpusRevision = 1;
+    existing.docCoverage = {
+      a: {
+        totalWindows: 8,
+        selectedWindows: [0, 1, 2, 3, 4, 5, 6, 7],
+        completedWindows: [0, 1, 2, 3, 4, 6, 7],
+        failedWindows: [5],
+        contentHash,
+      },
+    };
+    existing.failedDocIds = ['a'];
+    existing.docErrors = { a: 'Window 6/8: the model did not return valid JSON' };
+    // coverageMode intentionally left unset: this doc was targeted under full
+    // mode, but the corpus never fully completed (window 5 failed), so
+    // coverageMode never flipped to 'full'.
+    graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [{ id: 'a', name: 'A.md' }], corpusRevision: 1 } });
+    graphGetRaw.mockResolvedValue({ ok: true, result: existing });
+    docChunks.mockResolvedValue({ ok: true, result: chunks });
+    graphSet.mockResolvedValue({ ok: true });
+
+    const quickResult = await buildRepoGraph(S, 'repo', { mode: 'quick' });
+
+    // Quick's own sample for an 8-window doc is evenlySpacedIndices(8, 6) = [0,1,3,4,6,7] -- excludes 5.
+    expect(complete).not.toHaveBeenCalled();
+    expect(quickResult.graph?.docCoverage?.a.selectedWindows).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(quickResult.graph?.failedDocIds).toContain('a');
+    expect(quickResult.graph?.processedDocIds ?? []).not.toContain('a');
+
+    // A subsequent full-mode build does retry window 5, and completing it processes the doc.
+    graphGetRaw.mockResolvedValue({ ok: true, result: quickResult.graph });
+    complete.mockImplementation(async (_settings: unknown, messages: Array<{ content: string }>) => {
+      const id = messages[1].content.match(/^\[\[([^\]]+)\]\]/)?.[1] ?? 'missing';
+      return { content: JSON.stringify({ entities: [{ label: id, type: 'fact', summary: id, evidence: [id] }], relations: [] }) };
+    });
+
+    const fullResult = await buildRepoGraph(S, 'repo', { mode: 'full' });
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(fullResult.graph?.docCoverage?.a.completedWindows.sort()).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(fullResult.graph?.processedDocIds).toEqual(['a']);
+  });
+
+  it('does not fail a document when one window has nothing to extract but the others succeed', async () => {
+    // Regression test: a window returning valid, complete JSON with zero
+    // entities/relations (extractOneDoc's 'empty' outcome) is not a failure —
+    // it used to be bookkept identically to a truncated/unparseable response,
+    // which meant one legitimately boilerplate window (e.g. a references or
+    // qualification-table section) dragged an otherwise fully-extracted
+    // document into failedDocIds.
+    graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [{ id: 'a', name: 'A.md' }], corpusRevision: 1 } });
+    graphGetRaw.mockResolvedValue({ ok: true, result: null });
+    docChunks.mockResolvedValue({ ok: true, result: longDoc('a', 3) });
+    graphSet.mockResolvedValue({ ok: true });
+    complete.mockImplementation(async (_settings: unknown, messages: Array<{ content: string }>) => {
+      const id = messages[1].content.match(/^\[\[([^\]]+)\]\]/)?.[1] ?? 'missing';
+      if (id === 'a:c1:s0') return { content: '{"entities":[],"relations":[]}' };
+      return { content: JSON.stringify({ entities: [{ label: id, type: 'fact', summary: id, evidence: [id] }], relations: [] }) };
+    });
+
+    const result = await buildRepoGraph(S, 'repo', { mode: 'full' });
+
+    expect(result.ok).toBe(true);
+    expect(result.graph?.docCoverage?.a.completedWindows.sort()).toEqual([0, 1, 2]);
+    expect(result.graph?.docCoverage?.a.failedWindows).toEqual([]);
+    expect(result.graph?.processedDocIds).toEqual(['a']);
+    expect(result.graph?.failedDocIds ?? []).toEqual([]);
+    expect(result.warnings?.some((w) => w.includes('could not be extracted'))).not.toBe(true);
+  });
+
   it('stops without marking partial coverage failed and can resume from its checkpoint', async () => {
     const controller = new AbortController();
     graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [{ id: 'a', name: 'A.md' }], corpusRevision: 3 } });
-    graphGet.mockResolvedValue({ ok: true, result: null });
+    graphGetRaw.mockResolvedValue({ ok: true, result: null });
     docChunks.mockResolvedValue({ ok: true, result: longDoc('a', 3) });
     graphSet.mockResolvedValue({ ok: true });
     complete
