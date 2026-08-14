@@ -94,4 +94,17 @@ describe('generateStudioOutput prompt resolution', () => {
     const messages = complete.mock.calls.at(-1)?.[1];
     expect(messages[0].content).toContain('You write a concise briefing document');
   });
+
+  it('saves against the source graph revision and reports a concurrent mutation', async () => {
+    graphGet.mockResolvedValue({ ok: true, result: { ...g, corpusRevision: 7 } });
+    complete.mockResolvedValue({ content: 'Some briefing markdown.' });
+    resolveSentenceCitations.mockResolvedValue([]);
+    studioGet.mockResolvedValue({ ok: true, result: { outputs: {} } });
+    studioSet.mockResolvedValue({ ok: false, error: 'Repository changed while the Studio output was being generated.' });
+
+    const result = await generateStudioOutput({} as Settings, 'repo', 'briefing');
+
+    expect(studioSet).toHaveBeenCalledWith('repo', expect.any(Object), 7);
+    expect(result).toEqual({ ok: false, error: 'Repository changed while the Studio output was being generated.' });
+  });
 });

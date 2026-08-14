@@ -236,15 +236,35 @@ function isInteractive(el: Element): boolean {
   return role ? INTERACTIVE_ROLES.has(role) : false;
 }
 
+interface InteractiveHit {
+  el: Element;
+  /** Computed once here (visibility check needs it anyway) and reused by
+   * buildElementMap's mapping pass, instead of calling getBoundingClientRect
+   * on the same element a second time. */
+  rect: DOMRect;
+}
+
 // Collect interactive elements, descending into shadow roots and same-origin
 // iframes so apps built on web components or framed editors (e.g. OWA) are
 // reachable. Live elements are stored in refMap so refId resolution works
 // across roots.
-function collectInteractive(root: Document | ShadowRoot, out: Element[]): void {
+//
+// Walks with a TreeWalker rather than `root.querySelectorAll('*')` so a huge/
+// complex page doesn't pay for materializing an array of every element in the
+// document just to find the first 200 interactive ones — the walk stops the
+// instant the cap is hit.
+function collectInteractive(root: Document | ShadowRoot, out: InteractiveHit[]): void {
   if (out.length >= 200) return;
-  for (const el of Array.from(root.querySelectorAll('*'))) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  let node = walker.nextNode() as Element | null;
+  while (node) {
     if (out.length >= 200) break;
-    if (isInteractive(el) && isVisible(el)) out.push(el);
+    const el = node;
+    if (isInteractive(el)) {
+      const rect = el.getBoundingClientRect();
+      const style = rect.width > 0 && rect.height > 0 ? getComputedStyle(el) : null;
+      if (style && style.visibility !== 'hidden' && style.display !== 'none') out.push({ el, rect });
+    }
     const shadow = (el as HTMLElement).shadowRoot;
     if (shadow) collectInteractive(shadow, out);
     if (el instanceof HTMLIFrameElement) {
@@ -255,18 +275,18 @@ function collectInteractive(root: Document | ShadowRoot, out: Element[]): void {
         // Cross-origin iframe — not reachable without chrome.debugger.
       }
     }
+    node = walker.nextNode() as Element | null;
   }
 }
 
 export function buildElementMap(): ElementRef[] {
   refMap.clear();
   refCounter = 0;
-  const elements: Element[] = [];
-  collectInteractive(document, elements);
-  return elements.map((el) => {
+  const hits: InteractiveHit[] = [];
+  collectInteractive(document, hits);
+  return hits.map(({ el, rect: r }) => {
     const refId = `el-${refCounter++}`;
     refMap.set(refId, el);
-    const r = el.getBoundingClientRect();
     const name = computeName(el);
     const states = computeStates(el);
     const group = closestGroup(el);

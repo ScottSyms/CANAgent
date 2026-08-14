@@ -3,7 +3,7 @@ import { embedLocal } from './offscreenClient';
 import { getAdapter } from './adapters';
 import { apiVersion, authHeaders, buildUrl, LLM_TIMEOUT_MS, requestWithRetry, resolve, type RetryOpts } from './llmNetwork';
 import { LlmError } from './llmTypes';
-import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ToolDefinition } from './llmTypes';
+import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ResponseFormatSpec, ToolDefinition } from './llmTypes';
 
 // =============================================================================
 // Multi-protocol network adapter — the only module that talks to a model
@@ -67,7 +67,9 @@ export function messagesContainImage(msgs: LlmMessage[]): boolean {
 export function resolveModelForRole(settings: Settings, role: ModelRole): Settings {
   if (role === 'main') return settings;
   const profileId = settings.roleProfiles?.[role];
-  if (!profileId) return settings;
+  // Graph work historically used Utility. Preserve that routing unless the user
+  // explicitly assigns the dedicated Knowledge Graph role.
+  if (!profileId) return role === 'knowledgeGraph' ? resolveModelForRole(settings, 'utility') : settings;
   const profile = settings.modelProfiles?.find((p) => p.id === profileId);
   if (!profile) return settings;
   if (settings.restrictBackgroundToLocal && profile.privacyTier !== 'local') return settings;
@@ -80,6 +82,11 @@ export function resolveModelForRole(settings: Settings, role: ModelRole): Settin
     apiVersion: profile.apiVersion,
     temperature: profile.temperature ?? settings.temperature,
     maxTokens: profile.maxTokens ?? settings.maxTokens,
+    graphWindowChars: profile.graphWindowChars ?? settings.graphWindowChars,
+    graphExtractionStrategy: profile.graphExtractionStrategy ?? settings.graphExtractionStrategy,
+    graphContextBefore: profile.graphContextBefore ?? settings.graphContextBefore,
+    graphContextAfter: profile.graphContextAfter ?? settings.graphContextAfter,
+    graphGleaningEnabled: profile.graphGleaningEnabled ?? settings.graphGleaningEnabled,
   };
 }
 
@@ -105,7 +112,8 @@ export function embedderId(settings: Settings): string {
 export async function embedChunks(settings: Settings, texts: string[], signal?: AbortSignal): Promise<number[][]> {
   if (texts.length === 0) return [];
   if (settings.embedder === 'external') return embed(settings, texts, signal);
-  const res = await embedLocal(texts, settings.localEmbedModel || DEFAULT_LOCAL_EMBED_MODEL);
+  const model = settings.localEmbedModel || DEFAULT_LOCAL_EMBED_MODEL;
+  const res = signal ? await embedLocal(texts, model, signal) : await embedLocal(texts, model);
   if (!res.ok || !res.vectors) {
     throw new LlmError(`Local embedder failed: ${res.error ?? 'no vectors returned'}`);
   }
@@ -196,6 +204,17 @@ export async function transcribe(settings: Settings, audioDataUrl: string, signa
  * lets the runtime abort an in-flight request on stop/pause. An `AbortError`/
  * `TimeoutError` is rethrown as-is so the loop can distinguish cancellation
  * from a genuine endpoint failure (which becomes an `LlmError`).
+ *
+ * `responseFormat`, when given, asks the endpoint to guarantee its response
+ * matches a JSON schema at the token level (see ResponseFormatSpec in
+ * llmTypes.ts) — supported by Ollama, llama.cpp server, LM Studio, OpenAI,
+ * and Gemini; the Anthropic adapter ignores it (no native equivalent). An
+ * endpoint that doesn't recognize the field either ignores it silently
+ * (today's prompt-based JSON instructions and the caller's own
+ * truncated/unparseable-response recovery still apply unchanged) or rejects
+ * the request outright — the latter is handled below by retrying once with
+ * the field omitted, since a schema-supporting endpoint should never 4xx on
+ * a well-formed schema call.
  */
 export async function complete(
   settings: Settings,
@@ -203,38 +222,66 @@ export async function complete(
   tools?: ToolDefinition[],
   signal?: AbortSignal,
   onRetry?: RetryOpts['onRetry'],
+  responseFormat?: ResponseFormatSpec,
 ): Promise<LlmResponseMessage> {
   const adapter = getAdapter(settings.protocol);
-  const { url, headers, body } = adapter.buildRequest(settings, messages, tools);
+  let currentResponseFormat = responseFormat;
+  let triedWithoutResponseFormat = false;
 
-  let response: Response;
-  try {
-    response = await requestWithRetry(
-      (attemptSignal) =>
-        fetch(url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          signal: attemptSignal,
-        }),
-      { enabled: settings.retryOnRateLimit ?? true, signal, onRetry },
-    );
-  } catch (err) {
-    if (err instanceof DOMException && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+  // OpenRouter and other compatible gateways can report transient provider
+  // failures inside an HTTP-200 response. Retry one such parsed failure; no
+  // tool has executed yet, so replaying this completion is safe. The same
+  // budget also covers the (mutually exclusive) responseFormat-rejected
+  // fallback below — a genuinely flaky endpoint that ALSO doesn't support
+  // responseFormat is a rare enough double-failure not worth a second budget.
+  for (let parsedAttempt = 0; parsedAttempt < 2; parsedAttempt++) {
+    const { url, headers, body } = adapter.buildRequest(settings, messages, tools, currentResponseFormat);
+    let response: Response;
+    try {
+      response = await requestWithRetry(
+        (attemptSignal) =>
+          fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            signal: attemptSignal,
+          }),
+        { enabled: settings.retryOnRateLimit ?? true, signal, onRetry },
+      );
+    } catch (err) {
+      if (err instanceof DOMException && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+        throw err;
+      }
+      throw new LlmError(
+        `Could not reach the model endpoint (${settings.baseUrl}). ` +
+          `If the endpoint blocks cross-origin requests, re-save settings to grant the extension access to it. (${String(err)})`,
+      );
+    }
+
+    if (!response.ok) {
+      if (currentResponseFormat && !triedWithoutResponseFormat && response.status >= 400 && response.status < 500) {
+        triedWithoutResponseFormat = true;
+        currentResponseFormat = undefined;
+        continue;
+      }
+      const text = await response.text().catch(() => '');
+      const isHtml = response.headers.get('Content-Type')?.includes('text/html') || /^\s*<!doctype html/i.test(text);
+      const detail = isHtml ? 'The endpoint returned an HTML page instead of a model API response.' : text.slice(0, 500);
+      throw new LlmError(`Model endpoint ${url} returned ${response.status}: ${detail}`);
+    }
+
+    try {
+      const message = adapter.parseResponse(await response.json());
+      if (!message.content?.trim() && (!message.tool_calls || message.tool_calls.length === 0)) {
+        throw new LlmError('Model provider returned no usable text or tool call.', { retryable: true });
+      }
+      return message;
+    } catch (err) {
+      if (err instanceof LlmError && err.retryable && parsedAttempt === 0 && (settings.retryOnRateLimit ?? true)) continue;
       throw err;
     }
-    throw new LlmError(
-      `Could not reach the model endpoint (${settings.baseUrl}). ` +
-        `If the endpoint blocks cross-origin requests, re-save settings to grant the extension access to it. (${String(err)})`,
-    );
   }
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new LlmError(`Model endpoint returned ${response.status}: ${text.slice(0, 500)}`);
-  }
-
-  return adapter.parseResponse(await response.json());
+  throw new LlmError('Model provider returned no usable response after retrying.');
 }
 
 /**
@@ -246,7 +293,10 @@ export async function testConnection(settings: Settings): Promise<{ ok: boolean;
   try {
     // The probe should fail fast: no retries and a tiny deterministic completion,
     // since some local OpenAI-compatible servers default to very large outputs.
-    const message = await complete({ ...settings, retryOnRateLimit: false, temperature: 0, maxTokens: 8 }, [
+    // Reasoning-capable Gemini and Responses models need more than the legacy
+    // eight-token probe (Responses also enforces a minimum of 16).
+    const probeMaxTokens = settings.protocol === 'gemini-native' || settings.protocol === 'responses' ? 256 : 8;
+    const message = await complete({ ...settings, retryOnRateLimit: false, temperature: 0, maxTokens: probeMaxTokens }, [
       { role: 'user', content: 'Reply with the single word: ok' },
     ]);
     return { ok: true, detail: `Connected. Model replied: ${(message.content ?? '').slice(0, 100)}` };

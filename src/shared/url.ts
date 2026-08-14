@@ -67,7 +67,7 @@ export function resolvePdfUrl(url: string): string | null {
   }
 }
 
-const OFFICE_EXTENSION = /\.(docx?|docm|pptx?|pptm|xlsx?|xlsm)$/;
+const OFFICE_EXTENSION = /\.(docx?|docm|pptx?|pptm|ppsx|xlsx?|xlsm|odt|ods|odp|rtf|epub)$/;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // SharePoint sharing-link prefix: /:w:/r/<path>, /:x:/…, /:p:/… (Word/Excel/PowerPoint).
 const SHARING_PREFIX = /^\/:[wxp]:\/[a-z]\//i;

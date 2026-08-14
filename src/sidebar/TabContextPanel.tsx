@@ -1,3 +1,4 @@
+import { memo } from 'preact/compat';
 import { useEffect, useState } from 'preact/hooks';
 import type { SidebarCommand } from '../shared/messages';
 import type { Skill, TabContextSummary } from '../shared/types';
@@ -29,7 +30,7 @@ async function downscale(dataUrl: string, maxWidth: number): Promise<string> {
   });
 }
 
-export function TabContextPanel({ context, send, busy }: Props) {
+export const TabContextPanel = memo(function TabContextPanel({ context, send, busy }: Props) {
   const t = useT();
   // Re-render every 30s so staleness indicators stay honest.
   const [, setTick] = useState(0);
@@ -187,4 +188,4 @@ export function TabContextPanel({ context, send, busy }: Props) {
       )}
     </div>
   );
-}
+});

@@ -10,11 +10,20 @@ export type UploadKind = 'text' | 'pdf' | 'office';
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 
 const TEXT_EXT = ['txt', 'md', 'markdown', 'csv', 'tsv', 'log', 'text'];
-const OFFICE_EXT = ['docx', 'pptx', 'xlsx'];
+// Every format anydoc (src/offscreen/anydocParse.ts) genuinely converts,
+// minus 'csv' (already handled above as plain text — no parsing needed) and
+// minus legacy binary Excel ('xls'/'xlsb'): despite `formatFromExtension`
+// naively mapping those extension names onto 'xlsx', they are NOT the same
+// zip-based container format modern xlsx/xlsm are (pre-2007 BIFF binary,
+// verified via a direct content-conversion test, not just the extension
+// mapping — see the anydoc replacement's investigation), so they would fail
+// at conversion time despite passing this classification.
+const OFFICE_EXT = ['docx', 'doc', 'docm', 'pptx', 'ppt', 'pptm', 'ppsx', 'xlsx', 'xlsm', 'odt', 'ods', 'odp', 'rtf', 'epub'];
 const PDF_EXT = ['pdf'];
 
 /** The `accept` attribute value for the file inputs. */
-export const UPLOAD_ACCEPT = '.pdf,.docx,.pptx,.xlsx,.txt,.md,.markdown,.csv,.tsv,.log,.eml';
+export const UPLOAD_ACCEPT =
+  '.pdf,.docx,.doc,.docm,.pptx,.ppt,.pptm,.ppsx,.xlsx,.xlsm,.odt,.ods,.odp,.rtf,.epub,.txt,.md,.markdown,.csv,.tsv,.log,.eml';
 
 function extOf(name: string): string {
   const dot = name.lastIndexOf('.');

@@ -11,6 +11,7 @@ const PROTOCOLS: Array<{ value: ModelProtocol; label: string }> = [
 
 const ROLES: Array<{ role: Exclude<ModelRole, 'main'>; label: string; hint: string }> = [
   { role: 'utility', label: 'modelProfiles.utilityRole', hint: 'modelProfiles.utilityHint' },
+  { role: 'knowledgeGraph', label: 'modelProfiles.knowledgeGraphRole', hint: 'modelProfiles.knowledgeGraphHint' },
   { role: 'reflection', label: 'modelProfiles.reflectionRole', hint: 'modelProfiles.reflectionHint' },
   { role: 'plan', label: 'modelProfiles.planRole', hint: 'modelProfiles.planHint' },
   { role: 'vision', label: 'modelProfiles.visionRole', hint: 'modelProfiles.visionHint' },
@@ -104,6 +105,11 @@ export function ModelProfilesSection() {
       apiVersion: form.apiVersion?.trim() || undefined,
       temperature: form.temperature,
       maxTokens: form.maxTokens,
+      graphWindowChars: form.graphWindowChars,
+      graphExtractionStrategy: form.graphExtractionStrategy,
+      graphContextBefore: form.graphContextBefore,
+      graphContextAfter: form.graphContextAfter,
+      graphGleaningEnabled: form.graphGleaningEnabled,
       privacyTier: form.privacyTier,
       description,
       capabilities,
@@ -124,6 +130,11 @@ export function ModelProfilesSection() {
       apiVersion: p.apiVersion ?? '',
       temperature: p.temperature,
       maxTokens: p.maxTokens,
+      graphWindowChars: p.graphWindowChars,
+      graphExtractionStrategy: p.graphExtractionStrategy,
+      graphContextBefore: p.graphContextBefore,
+      graphContextAfter: p.graphContextAfter,
+      graphGleaningEnabled: p.graphGleaningEnabled,
       privacyTier: p.privacyTier ?? 'cloud',
       description: p.description ?? '',
       capabilities: {
@@ -246,6 +257,59 @@ export function ModelProfilesSection() {
             </label>
           </div>
           <label class="field">
+            <span>{t('modelProfiles.graphWindowChars')}</span>
+            <input
+              type="number" min="500" step="500" placeholder="6000"
+              value={form.graphWindowChars ?? ''}
+              onInput={(e) => { const v = (e.target as HTMLInputElement).value; setForm({ ...form, graphWindowChars: v === '' ? undefined : Number(v) }); }}
+            />
+          </label>
+          <p class="settings-note">{t('modelProfiles.graphWindowCharsHint')}</p>
+          <label class="field">
+            <span>{t('modelProfiles.graphExtractionStrategy')}</span>
+            <select
+              value={form.graphExtractionStrategy ?? 'window'}
+              onChange={(e) => setForm({ ...form, graphExtractionStrategy: (e.target as HTMLSelectElement).value as 'window' | 'sentence' })}
+            >
+              <option value="window">{t('modelProfiles.graphStrategyWindow')}</option>
+              <option value="sentence">{t('modelProfiles.graphStrategySentence')}</option>
+            </select>
+          </label>
+          <p class="settings-note">{t('modelProfiles.graphExtractionStrategyHint')}</p>
+          {form.graphExtractionStrategy !== 'sentence' && (
+            <label class="toggle-row">
+              <input
+                type="checkbox"
+                checked={form.graphGleaningEnabled ?? true}
+                onChange={(e) => setForm({ ...form, graphGleaningEnabled: (e.target as HTMLInputElement).checked })}
+              />
+              <span class="toggle-text">
+                <span class="toggle-label">{t('modelProfiles.graphGleaningEnabled')}</span>
+                <span class="toggle-note">{t('modelProfiles.graphGleaningEnabledHint')}</span>
+              </span>
+            </label>
+          )}
+          {form.graphExtractionStrategy === 'sentence' && (
+            <div class="field-row">
+              <label class="field">
+                <span>{t('modelProfiles.graphContextBefore')}</span>
+                <input
+                  type="number" min="0" max="5" placeholder="1"
+                  value={form.graphContextBefore ?? ''}
+                  onInput={(e) => { const v = (e.target as HTMLInputElement).value; setForm({ ...form, graphContextBefore: v === '' ? undefined : Number(v) }); }}
+                />
+              </label>
+              <label class="field">
+                <span>{t('modelProfiles.graphContextAfter')}</span>
+                <input
+                  type="number" min="0" max="5" placeholder="1"
+                  value={form.graphContextAfter ?? ''}
+                  onInput={(e) => { const v = (e.target as HTMLInputElement).value; setForm({ ...form, graphContextAfter: v === '' ? undefined : Number(v) }); }}
+                />
+              </label>
+            </div>
+          )}
+          <label class="field">
             <span>{t('modelProfiles.privacyTier')}</span>
             <select value={form.privacyTier ?? 'cloud'} onChange={(e) => setForm({ ...form, privacyTier: (e.target as HTMLSelectElement).value as 'local' | 'cloud' })}>
               <option value="cloud">{t('modelProfiles.cloud')}</option>
@@ -322,7 +386,9 @@ export function ModelProfilesSection() {
                   </td>
                   <td>
                     <select value={settings.roleProfiles?.[role] ?? ''} onChange={(e) => setRoleProfile(role, (e.target as HTMLSelectElement).value)}>
-                      <option value="">{t('modelProfiles.sameAsMain')}</option>
+                      <option value="">
+                        {t(role === 'knowledgeGraph' ? 'modelProfiles.sameAsUtility' : 'modelProfiles.sameAsMain')}
+                      </option>
                       {profiles.map((p) => (
                         <option key={p.id} value={p.id}>{p.name}{p.description ? ` — ${p.description}` : ''}</option>
                       ))}

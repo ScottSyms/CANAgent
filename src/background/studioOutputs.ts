@@ -8,7 +8,7 @@ import type { LlmMessage } from './llmProvider';
 import { complete, resolveModelForRole } from './llmProvider';
 import { renderSubgraphForModel, type DocGraph } from '../shared/docGraph';
 import { renderCommunitiesForModel } from '../shared/graphCommunities';
-import { citationTokenRe, extractCitationIds } from '../shared/citations';
+import { citationIdsInReference, citationTokenRe, extractCitationIds } from '../shared/citations';
 import { resolvePrompt, STUDIO_COMMON_TAIL } from '../shared/promptDefaults';
 import { resolveSentenceCitations } from './sentenceResolve';
 import { graphGet, studioGet, studioSet } from './offscreenClient';
@@ -55,8 +55,10 @@ export function buildStudioContext(graph: DocGraph): string {
 /** Strip [[id]] tokens whose id didn't resolve (fabricated/stale); keep valid ones. */
 export function cleanCitations(markdown: string, validIds: Set<string>): string {
   return markdown.replace(citationTokenRe(), (_whole, rawId: string) => {
-    const id = rawId.trim();
-    return validIds.has(id) ? `[[${id}]]` : '';
+    return citationIdsInReference(rawId)
+      .filter((id) => validIds.has(id))
+      .map((id) => `[[${id}]]`)
+      .join(' ');
   });
 }
 
@@ -111,7 +113,8 @@ export async function generateStudioOutput(
   const docRes = await studioGet(repo);
   const doc = ((docRes.ok ? docRes.result : null) as StudioDoc | null) ?? { outputs: {} };
   doc.outputs = { ...doc.outputs, [kind]: output };
-  await studioSet(repo, doc);
+  const setRes = await studioSet(repo, doc, graph.corpusRevision ?? 0);
+  if (!setRes.ok) return { ok: false, error: setRes.error ?? 'Could not save this Studio output.' };
 
   return { ok: true, output };
 }

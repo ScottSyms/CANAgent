@@ -12,6 +12,22 @@ describe('geminiNativeAdapter.buildRequest', () => {
     expect(req.headers['x-goog-api-key']).toBe('AIza-test');
   });
 
+  it('preserves a versioned OpenCode Zen base URL', () => {
+    const req = geminiNativeAdapter.buildRequest(
+      { ...settings, baseUrl: 'https://opencode.ai/zen/v1/', model: 'gemini-3.6-flash' },
+      [{ role: 'user', content: 'hi' }],
+    );
+    expect(req.url).toBe('https://opencode.ai/zen/v1/models/gemini-3.6-flash:generateContent');
+  });
+
+  it('preserves an explicit v1beta base URL', () => {
+    const req = geminiNativeAdapter.buildRequest(
+      { ...settings, baseUrl: 'https://generativelanguage.googleapis.com/v1beta/' },
+      [{ role: 'user', content: 'hi' }],
+    );
+    expect(req.url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent');
+  });
+
   it('pulls the system message into systemInstruction and maps assistant -> model role', () => {
     const messages: LlmMessage[] = [
       { role: 'system', content: 'be helpful' },
@@ -43,6 +59,34 @@ describe('geminiNativeAdapter.buildRequest', () => {
     expect(body.contents[2]).toEqual({
       role: 'user',
       parts: [{ functionResponse: { name: 'get_weather', response: { result: '72F sunny' } } }],
+    });
+  });
+
+  it('returns Gemini thought signatures with function calls on the next turn', () => {
+    const firstReply = geminiNativeAdapter.parseResponse({
+      candidates: [{
+        content: {
+          parts: [{
+            functionCall: { name: 'get_active_tab', args: {} },
+            thoughtSignature: 'opaque-signature',
+          }],
+        },
+      }],
+    });
+    const req = geminiNativeAdapter.buildRequest(settings, [
+      { role: 'user', content: 'Summarize this page.' },
+      firstReply,
+      { role: 'tool', tool_call_id: firstReply.tool_calls![0].id, content: '{"title":"Example"}' },
+    ]);
+    const body = req.body as { contents: Array<{ role: string; parts: unknown[] }> };
+
+    expect(firstReply.tool_calls?.[0].thoughtSignature).toBe('opaque-signature');
+    expect(body.contents[1]).toEqual({
+      role: 'model',
+      parts: [{
+        functionCall: { name: 'get_active_tab', args: {} },
+        thoughtSignature: 'opaque-signature',
+      }],
     });
   });
 
@@ -87,6 +131,18 @@ describe('geminiNativeAdapter.parseResponse', () => {
   });
 
   it('throws when there are no candidates', () => {
-    expect(() => geminiNativeAdapter.parseResponse({ candidates: [] })).toThrow();
+    expect(() => geminiNativeAdapter.parseResponse({ candidates: [] })).toThrow('Gemini returned no candidates.');
+  });
+
+  it('explains when the output token limit is reached before visible content', () => {
+    expect(() => geminiNativeAdapter.parseResponse({ candidates: [{ finishReason: 'MAX_TOKENS' }] })).toThrow(
+      'Increase Max tokens and retry.',
+    );
+  });
+
+  it('reports prompt safety blocks', () => {
+    expect(() => geminiNativeAdapter.parseResponse({
+      promptFeedback: { blockReason: 'SAFETY', blockReasonMessage: 'Blocked by policy.' },
+    })).toThrow('Gemini blocked the prompt (SAFETY): Blocked by policy.');
   });
 });

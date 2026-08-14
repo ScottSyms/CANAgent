@@ -1,3 +1,4 @@
+import { memo } from 'preact/compat';
 import { useState } from 'preact/hooks';
 import { useT } from './i18n';
 import type { ToolActivity } from '../shared/types';
@@ -9,7 +10,7 @@ const STATUS_ICONS: Record<ToolActivity['status'], string> = {
   denied: '⊘',
 };
 
-export function ToolActivityPanel({ activities }: { activities: ToolActivity[] }) {
+export const ToolActivityPanel = memo(function ToolActivityPanel({ activities }: { activities: ToolActivity[] }) {
   const t = useT();
   const [open, setOpen] = useState(false);
 
@@ -35,4 +36,4 @@ export function ToolActivityPanel({ activities }: { activities: ToolActivity[] }
       )}
     </div>
   );
-}
+});

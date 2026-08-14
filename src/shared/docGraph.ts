@@ -7,6 +7,7 @@
 // RAG answers.
 
 import { shortHash } from './sentenceSplit';
+import { buildAnnIndex, buildForwardAdjacency } from './annIndex';
 
 export interface GraphNode {
   id: string;
@@ -20,6 +21,8 @@ export interface GraphNode {
   evidenceSentenceIds: string[];
   /** Documents the node appears in. */
   docIds: string[];
+  /** L2-normalized embedding of `${label} — ${summary}`, keyed to DocGraph.embedModel. Absent until a dedup pass computes it. */
+  embedding?: number[];
 }
 
 export interface GraphEdge {
@@ -44,14 +47,58 @@ export interface CommunitySummary {
   /** Member node ids. */
   nodeIds: string[];
   evidenceSentenceIds: string[];
+  /** How this summary was produced. Absent on summaries written before this field existed — treated as 'llm'. */
+  method?: 'llm' | 'extractive';
+}
+
+export type GraphCoverageMode = 'quick' | 'full';
+
+export interface GraphDocCoverage {
+  /** Number of extraction windows in the complete document. */
+  totalWindows: number;
+  /** Union of every window index any build has ever targeted for this doc
+   * (not just the most recent build's sample) — so a narrower quick-mode
+   * sample can never erase memory of windows a broader full-mode build
+   * previously targeted (including ones that failed). */
+  selectedWindows: number[];
+  /** Successfully extracted window indices, checkpointed individually. */
+  completedWindows: number[];
+  /** Failed window indices; retried by later builds. */
+  failedWindows: number[];
+  /** Window indices skipped by the low-information pre-filter — no model call was made. */
+  skippedWindows?: number[];
+  /**
+   * shortHash() of this doc's concatenated chunk text when this coverage was
+   * last established. Gates whether completedWindows/failedWindows are
+   * trusted (content unchanged) or reset (content changed/never hashed).
+   * Absent on coverage records written before this field existed — treated
+   * as "no signal, assume changed" so a legacy record gets exactly one clean
+   * re-hash + possible reprocess, not a crash or a silent trust of stale
+   * progress.
+   */
+  contentHash?: string;
+  /**
+   * shortHash() of this doc's content the last time the on-device NER
+   * backbone (src/background/graphExtract.ts's runNerBackbone, used by the
+   * "Quick" build) processed it. Entirely separate from `contentHash` above —
+   * the NER backbone doesn't participate in the quick/full LLM coverage state
+   * machine at all (no selectedWindows/completedWindows, no coverageMode, no
+   * processedDocIds), it just skips re-running NER on a document whose
+   * content hasn't changed since its last backbone pass.
+   */
+  fastContentHash?: string;
 }
 
 export interface DocGraph {
   nodes: GraphNode[];
   edges: GraphEdge[];
   version: number;
-  /** Embedder identity, reserved for a future embedding-based node index. */
+  /** Repository corpus revision this graph was extracted from. Absent means legacy revision 0. */
+  corpusRevision?: number;
+  /** Embedder identity that produced GraphNode.embedding values, so a switched embedder invalidates them instead of comparing incompatible vectors. */
   embedModel?: string;
+  /** Node ids touched (created/re-merged) since their community last received an LLM summary. Persisted so it survives interrupted/resumed builds. */
+  dirtyNodeIds?: string[];
   /** Doc ids already folded in — lets extraction resume without reprocessing. */
   processedDocIds: string[];
   /**
@@ -65,12 +112,17 @@ export interface DocGraph {
   docErrors?: Record<string, string>;
   /** Corpus-level topic communities + summaries (computed after extraction). */
   communities?: CommunitySummary[];
+  /** Per-document extraction coverage. Absent on legacy graphs. */
+  docCoverage?: Record<string, GraphDocCoverage>;
+  /** Highest coverage mode completed or currently being built. */
+  coverageMode?: GraphCoverageMode;
   updatedAt: string;
 }
 
-export const DOC_GRAPH_VERSION = 1;
-export const MAX_GRAPH_NODES = 600;
-export const MAX_GRAPH_EDGES = 1200;
+// v3 adds optional GraphNode.embedding, DocGraph.dirtyNodeIds,
+// GraphDocCoverage.skippedWindows, CommunitySummary.method — all additive, no
+// migration needed; legacy graphs simply have `undefined` until their next build.
+export const DOC_GRAPH_VERSION = 3;
 const MAX_EVIDENCE_PER_ITEM = 12;
 
 export function emptyDocGraph(): DocGraph {
@@ -93,6 +145,7 @@ export function markDocProcessed(graph: DocGraph, docId: string): void {
  * OUT of processedDocIds so it is retried on the next non-rebuild build. Dedupes.
  */
 export function markDocFailed(graph: DocGraph, docId: string, reason: string): void {
+  graph.processedDocIds = graph.processedDocIds.filter((id) => id !== docId);
   if (!graph.failedDocIds) graph.failedDocIds = [];
   if (!graph.failedDocIds.includes(docId)) graph.failedDocIds.push(docId);
   if (!graph.docErrors) graph.docErrors = {};
@@ -164,7 +217,7 @@ export function coerceExtraction(obj: unknown, validIds: Set<string>): DocExtrac
           summary: typeof e.summary === 'string' ? e.summary.trim() : '',
           evidence: keepIds(strArr(e.evidence)),
         }))
-        .filter((e) => e.label)
+        .filter((e) => e.label && e.evidence.length > 0)
     : [];
 
   const relations: ExtractedRelation[] = Array.isArray(o.relations)
@@ -176,7 +229,7 @@ export function coerceExtraction(obj: unknown, validIds: Set<string>): DocExtrac
           relation: typeof r.relation === 'string' ? r.relation.trim() : '',
           evidence: keepIds(strArr(r.evidence)),
         }))
-        .filter((r) => r.from && r.to && r.relation)
+        .filter((r) => r.from && r.to && r.relation && r.evidence.length > 0)
     : [];
 
   return { entities, relations };
@@ -198,7 +251,12 @@ function indexByLabel(graph: DocGraph): Map<string, GraphNode> {
  * missing ones) and merge by (from, relation, to). Evidence sentence ids are
  * unioned. Records the doc as processed. Deterministic given the same inputs.
  */
-export function mergeExtraction(graph: DocGraph, extraction: DocExtraction, docId: string): DocGraph {
+export function mergeExtraction(
+  graph: DocGraph,
+  extraction: DocExtraction,
+  docId: string,
+  opts: { markProcessed?: boolean; touchedNodeIds?: Set<string> } = {},
+): DocGraph {
   const idx = indexByLabel(graph);
 
   const resolveOrCreate = (label: string, type: string, summary: string): GraphNode => {
@@ -215,12 +273,15 @@ export function mergeExtraction(graph: DocGraph, extraction: DocExtraction, docI
         idx.set(key, node);
       }
     }
+    opts.touchedNodeIds?.add(node.id);
     return node;
   };
 
   for (const e of extraction.entities) {
     const node = resolveOrCreate(e.label, e.type, e.summary);
-    if (!node.summary && e.summary) node.summary = e.summary;
+    // Prefer the richer description rather than permanently preserving whichever
+    // document happened to be ingested first.
+    if (e.summary.length > node.summary.length) node.summary = e.summary;
     if (normLabel(e.label) !== normLabel(node.label)) uniqPush(node.aliases, [e.label], 20);
     uniqPush(node.evidenceSentenceIds, e.evidence, 50);
     uniqPush(node.docIds, [docId], 200);
@@ -240,12 +301,164 @@ export function mergeExtraction(graph: DocGraph, extraction: DocExtraction, docI
     uniqPush(edge.evidenceSentenceIds, r.evidence, 50);
   }
 
-  if (!graph.processedDocIds.includes(docId)) graph.processedDocIds.push(docId);
-  graph.nodes = graph.nodes.slice(0, MAX_GRAPH_NODES);
-  const nodeIds = new Set(graph.nodes.map((n) => n.id));
-  graph.edges = graph.edges.filter((e) => nodeIds.has(e.from) && nodeIds.has(e.to)).slice(0, MAX_GRAPH_EDGES);
+  if (opts.markProcessed !== false && !graph.processedDocIds.includes(docId)) graph.processedDocIds.push(docId);
   graph.updatedAt = new Date().toISOString();
   return graph;
+}
+
+// ----- embedding-based fuzzy entity dedup (second pass, after exact-label merge) -----
+
+/** Cosine-similarity threshold for folding two entities together by embedding alone. Conservative: MiniLM isn't fine-tuned for entity linking. */
+export const EMBED_MERGE_THRESHOLD = 0.9;
+
+const GENERIC_TYPES = new Set(['entity']);
+
+/** Dot product of two already L2-normalized vectors (= cosine similarity). Mismatched lengths score 0 rather than throwing. */
+export function cosineSim(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += a[i] * b[i];
+  return sum;
+}
+
+/** Two entity types may be merged if they match exactly, or either is the generic model fallback type — never fold a `person` into an `organization` on embedding similarity alone. */
+function typesCompatible(a: string, b: string): boolean {
+  const na = normLabel(a);
+  const nb = normLabel(b);
+  return na === nb || GENERIC_TYPES.has(na) || GENERIC_TYPES.has(nb);
+}
+
+/** Fold `absorb` into `keep`: union aliases/evidence/docIds, prefer the richer summary, redirect edges (deduping/dropping self-loops on collision), and remove the absorbed node. Takes the already-resolved node objects (not ids) so callers iterating pairs don't need a redundant lookup per pair. */
+function mergeNodePair(graph: DocGraph, keep: GraphNode, absorb: GraphNode): void {
+  const keepId = keep.id;
+  const absorbId = absorb.id;
+
+  if (absorb.summary.length > keep.summary.length) keep.summary = absorb.summary;
+  uniqPush(keep.aliases, [absorb.label, ...absorb.aliases], 20);
+  uniqPush(keep.evidenceSentenceIds, absorb.evidenceSentenceIds, 50);
+  uniqPush(keep.docIds, absorb.docIds, 200);
+
+  for (const edge of [...graph.edges]) {
+    const newFrom = edge.from === absorbId ? keepId : edge.from;
+    const newTo = edge.to === absorbId ? keepId : edge.to;
+    if (newFrom === edge.from && newTo === edge.to) continue;
+    if (newFrom === newTo) {
+      // The merge collapsed a relation onto itself — no self-loop, just drop it.
+      graph.edges = graph.edges.filter((e) => e.id !== edge.id);
+      continue;
+    }
+    const newId = edgeIdFor(newFrom, edge.relation, newTo);
+    const existing = graph.edges.find((e) => e.id === newId && e.id !== edge.id);
+    if (existing) {
+      uniqPush(existing.evidenceSentenceIds, edge.evidenceSentenceIds, 50);
+      graph.edges = graph.edges.filter((e) => e.id !== edge.id);
+    } else {
+      edge.id = newId;
+      edge.from = newFrom;
+      edge.to = newTo;
+    }
+  }
+
+  graph.nodes = graph.nodes.filter((n) => n.id !== absorbId);
+}
+
+/**
+ * Change an edge's relation label, recomputing its id (which encodes
+ * `from|relation|to`, see `edgeIdFor`) so a later rebuild that regenerates the
+ * original generic relation for the same from/to pair (e.g. the NER
+ * backbone's "co-occurs with") finds no existing edge under the old id and
+ * doesn't recreate a duplicate — and so a collision with an edge that already
+ * has the new relation merges evidence into it instead of leaving two edges
+ * for the same fact. Used by the bounded LLM relation-typing enrichment pass
+ * (src/background/graphExtract.ts) to upgrade a co-occurrence edge to a real
+ * relationship without disturbing dedup/merge invariants.
+ */
+export function retypeEdge(graph: DocGraph, edge: GraphEdge, newRelation: string): void {
+  const newId = edgeIdFor(edge.from, newRelation, edge.to);
+  if (newId === edge.id) {
+    edge.relation = newRelation;
+    return;
+  }
+  const existing = graph.edges.find((e) => e.id === newId);
+  if (existing) {
+    uniqPush(existing.evidenceSentenceIds, edge.evidenceSentenceIds, 50);
+    graph.edges = graph.edges.filter((e) => e.id !== edge.id);
+  } else {
+    edge.id = newId;
+    edge.relation = newRelation;
+  }
+}
+
+// Yield back to the event loop this often (in pairwise comparisons), so a
+// large dedup pass never monopolizes the single-threaded service worker for
+// more than a fraction of a second at a stretch — the extension (chat, the
+// build-progress poll, everything) shares that one thread. A real macrotask
+// yield (setTimeout), not a microtask, since chrome.runtime message dispatch
+// needs an actual event-loop turn to run.
+const YIELD_EVERY_COMPARISONS = 2000;
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Second-pass fuzzy merge over the graph's (already exact-label-deduped) nodes,
+ * using precomputed embeddings. Greedy single-pass in stable id order (not
+ * globally-optimal clustering). Candidate pairs come from an approximate
+ * nearest-neighbor bucketing (src/shared/annIndex.ts) instead of an all-pairs
+ * scan, so this stays sub-quadratic at node counts in the thousands+ — each
+ * surviving candidate is still a real id-map lookup plus a 384-d dot product,
+ * with periodic yields (see YIELD_EVERY_COMPARISONS) so a large dedup pass
+ * never monopolizes the single-threaded service worker for more than a
+ * fraction of a second at a stretch. Mutates `graph.dirtyNodeIds` in place,
+ * rewriting any absorbed id to its surviving id, so callers tracking
+ * "touched" node ids for incremental community summarization stay correct
+ * across merges.
+ */
+export async function mergeSimilarNodes(
+  graph: DocGraph,
+  embeddings: Map<string, number[]>,
+  opts: { threshold?: number } = {},
+): Promise<{ mergedCount: number; idRemap: Map<string, string> }> {
+  const threshold = opts.threshold ?? EMBED_MERGE_THRESHOLD;
+  const ids = graph.nodes.map((n) => n.id).sort().filter((id) => embeddings.has(id));
+  const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
+  const absorbed = new Set<string>();
+  const idRemap = new Map<string, string>();
+  let mergedCount = 0;
+  let comparisons = 0;
+
+  const vectors = ids.map((id) => embeddings.get(id)!);
+  const adjacency = buildForwardAdjacency(buildAnnIndex(vectors));
+
+  for (let i = 0; i < ids.length; i++) {
+    const keepId = ids[i];
+    if (absorbed.has(keepId)) continue;
+    const keepNode = nodeById.get(keepId);
+    if (!keepNode) continue;
+    const keepEmb = vectors[i];
+
+    for (const j of adjacency.get(i) ?? []) {
+      const candidateId = ids[j];
+      if (absorbed.has(candidateId)) continue;
+
+      comparisons++;
+      if (comparisons % YIELD_EVERY_COMPARISONS === 0) await yieldToEventLoop();
+
+      const candidateNode = nodeById.get(candidateId);
+      if (!candidateNode || !typesCompatible(keepNode.type, candidateNode.type)) continue;
+      if (cosineSim(keepEmb, vectors[j]) < threshold) continue;
+      mergeNodePair(graph, keepNode, candidateNode);
+      absorbed.add(candidateId);
+      idRemap.set(candidateId, keepId);
+      mergedCount++;
+    }
+  }
+
+  if (idRemap.size > 0 && graph.dirtyNodeIds) {
+    graph.dirtyNodeIds = [...new Set(graph.dirtyNodeIds.map((id) => idRemap.get(id) ?? id))];
+  }
+
+  return { mergedCount, idRemap };
 }
 
 // ----- retrieval for GraphRAG answering -----

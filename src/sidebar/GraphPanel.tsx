@@ -2,17 +2,35 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CommunitySummary, DocGraph, GraphEdge, GraphNode } from '../shared/docGraph';
 import type { Citation } from '../shared/types';
 import { CitationView } from './CitationView';
+import { DocWindowsView } from './DocWindowsView';
 
 // The per-notebook knowledge graph: a Build/Rebuild control with live progress, a
 // radial concept map (nodes colored by theme), the extracted themes (graph
 // communities, GraphRAG "global" sensemaking), and click-through from any entity
 // or theme to the exact source sentences behind it.
 
+// Structurally covers GraphBuildFastProgress/GraphBuildProgress/
+// GraphBuildInstantProgress from src/background/graphExtract.ts — declared
+// locally (not imported) to keep this UI module decoupled from background
+// internals, matching how GetResponse/BuildResponse are already hand-declared
+// here rather than imported.
+interface BuildProgress {
+  docsTotal: number;
+  docsDone: number;
+  currentDoc?: string;
+  nodes?: number;
+  edges?: number;
+  chunksGathered?: number;
+  windowsTotal?: number;
+  windowsDone?: number;
+}
 interface GetResponse {
   ok: boolean;
   graph: DocGraph | null;
   docCount: number;
+  docs: Array<{ id: string; name: string }>;
   building: boolean;
+  progress?: BuildProgress;
 }
 interface BuildResponse {
   ok: boolean;
@@ -70,13 +88,17 @@ const colorForIndex = (i: number | undefined) => (i === undefined ? 'var(--accen
 export function GraphPanel({ repo }: { repo: string }) {
   const [graph, setGraph] = useState<DocGraph | null>(null);
   const [docCount, setDocCount] = useState(0);
+  const [docs, setDocs] = useState<Array<{ id: string; name: string }>>([]);
   const [building, setBuilding] = useState(false);
+  const [progress, setProgress] = useState<BuildProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<{ title: string; summary: string; color?: string } | null>(null);
   const [evidence, setEvidence] = useState<Citation[]>([]);
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
+  const [entityQuery, setEntityQuery] = useState('');
+  const [viewingDocId, setViewingDocId] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
   const refresh = async () => {
@@ -84,7 +106,9 @@ export function GraphPanel({ repo }: { repo: string }) {
       const res = (await chrome.runtime.sendMessage({ type: 'notebook_graph_get', repo })) as GetResponse;
       setGraph(res?.graph ?? null);
       setDocCount(res?.docCount ?? 0);
+      setDocs(res?.docs ?? []);
       setBuilding(!!res?.building);
+      setProgress(res?.building ? res?.progress ?? null : null);
       return res;
     } catch {
       return null;
@@ -99,14 +123,15 @@ export function GraphPanel({ repo }: { repo: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo]);
 
-  const build = async (rebuild: boolean) => {
+  const build = async (mode: 'quick' | 'full' | 'instant', rebuild = false) => {
     setError(null);
     setWarnings([]);
     setBuilding(true);
+    setProgress(null);
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(() => void refresh(), 2000) as unknown as number;
     try {
-      const res = (await chrome.runtime.sendMessage({ type: 'notebook_graph_build', repo, rebuild })) as BuildResponse;
+      const res = (await chrome.runtime.sendMessage({ type: 'notebook_graph_build', repo, rebuild, mode })) as BuildResponse;
       if (res?.ok && res.graph) setGraph(res.graph);
       if (res?.ok) setWarnings(res.warnings ?? []);
       else if (res && !res.ok) setError(res.error ?? 'Graph build failed.');
@@ -116,7 +141,16 @@ export function GraphPanel({ repo }: { repo: string }) {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = null;
     setBuilding(false);
+    setProgress(null);
     void refresh();
+  };
+
+  const cancelBuild = async () => {
+    await chrome.runtime.sendMessage({ type: 'notebook_graph_cancel', repo });
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = null;
+    setBuilding(false);
+    setProgress(null);
   };
 
   const showEvidence = async (title: string, summary: string, ids: string[], color?: string) => {
@@ -144,11 +178,23 @@ export function GraphPanel({ repo }: { repo: string }) {
   const processed = graph?.processedDocIds.length ?? 0;
   const failedIds = graph?.failedDocIds ?? [];
   const docErrors = graph?.docErrors ?? {};
+  const docNameById = new Map(docs.map((d) => [d.id, d.name]));
   const nodeCount = graph?.nodes.length ?? 0;
   const edgeCount = graph?.edges.length ?? 0;
   const communities = graph?.communities ?? [];
+  const coverage = Object.values(graph?.docCoverage ?? {});
+  const selectedWindows = coverage.reduce((sum, item) => sum + item.selectedWindows.length, 0);
+  const completedWindows = coverage.reduce(
+    (sum, item) => sum + item.selectedWindows.filter((index) => item.completedWindows.includes(index)).length,
+    0,
+  );
+  const totalWindows = coverage.reduce((sum, item) => sum + item.totalWindows, 0);
+  const pendingWindows = selectedWindows - completedWindows;
   const view = graph ? layout(graph) : null;
   const comIdx = graph ? communityIndex(graph) : new Map<string, number>();
+  const matchingNodes = graph
+    ? graph.nodes.filter((node) => `${node.label} ${node.type} ${node.summary}`.toLowerCase().includes(entityQuery.trim().toLowerCase()))
+    : [];
 
   return (
     <div class="graph-panel" style={{ margin: '6px 0 10px', padding: '10px', border, borderRadius: '8px' }}>
@@ -159,12 +205,32 @@ export function GraphPanel({ repo }: { repo: string }) {
           Knowledge graph
         </strong>
         <div style={{ display: 'flex', gap: '6px' }}>
-          <button class="btn btn-small" disabled={building} onClick={() => void build(false)}>
-            {building ? 'Building…' : nodeCount > 0 ? 'Update' : 'Build graph'}
-          </button>
+          {building ? (
+            <button class="btn btn-small" onClick={() => void cancelBuild()}>Stop build</button>
+          ) : (
+            <>
+              <button
+                class="btn btn-small"
+                onClick={() => void build('quick')}
+                title="On-device NER finds entities and relationships (free, no model calls), then a bounded, fixed-size batch of model calls names each theme and upgrades the most important relationships — call count doesn't grow with document count, so this stays fast even on a large notebook."
+              >
+                {nodeCount > 0 ? 'Quick update' : 'Quick build'}
+              </button>
+              <button class="btn btn-small" onClick={() => void build('full')} title="Process every document window; resumable but may use many model calls">
+                Full coverage
+              </button>
+              <button
+                class="btn btn-small"
+                onClick={() => void build('instant')}
+                title="Cluster the embeddings already computed for search — no model calls at all, not even NER. Produces topic clusters (not named entities) with keyword labels; edges just mean 'appears in the same document'. No model configuration needed to use this mode."
+              >
+                Instant (topics)
+              </button>
+            </>
+          )}
           {(nodeCount > 0 || failedIds.length > 0) && !building && (
-            <button class="btn btn-small" onClick={() => void build(true)} title="Discard and re-extract from scratch">
-              Rebuild
+            <button class="btn btn-small" onClick={() => void build('full', true)} title="Discard and fully re-extract from scratch">
+              Full rebuild
             </button>
           )}
         </div>
@@ -178,7 +244,21 @@ export function GraphPanel({ repo }: { repo: string }) {
 
       {building && (
         <p class="settings-note">
-          Extracting… {processed} / {docCount} documents · {nodeCount} entities, {edgeCount} relationships
+          {progress ? (
+            <>
+              {progress.currentDoc ? `Processing "${progress.currentDoc}"… ` : 'Processing… '}
+              {progress.docsDone} / {progress.docsTotal || docCount} documents
+              {progress.windowsTotal ? ` · ${progress.windowsDone ?? 0}/${progress.windowsTotal} windows` : ''}
+              {progress.chunksGathered !== undefined ? ` · ${progress.chunksGathered} chunks gathered` : ''}
+              {progress.nodes !== undefined ? ` · ${progress.nodes} entities, ${progress.edges ?? 0} relationships` : ''}
+            </>
+          ) : (
+            <>
+              Extracting… {processed} / {docCount} documents
+              {selectedWindows > 0 ? ` · ${completedWindows}/${selectedWindows} selected windows` : ''}
+              {' · '}{nodeCount} entities, {edgeCount} relationships
+            </>
+          )}
         </p>
       )}
 
@@ -203,11 +283,29 @@ export function GraphPanel({ repo }: { repo: string }) {
           <ul style={{ margin: '4px 0 0', paddingLeft: '18px' }}>
             {failedIds.map((id) => (
               <li key={id} class="settings-note" style={{ fontSize: '12px' }}>
-                {id}: {docErrors[id] ?? 'unknown error'}
+                <button
+                  class="link-btn"
+                  style={{ font: 'inherit', padding: 0 }}
+                  onClick={() => setViewingDocId(id)}
+                  title="View the exact text sent for extraction"
+                >
+                  {docNameById.get(id) ?? id}
+                </button>
+                : {docErrors[id] ?? 'unknown error'}
               </li>
             ))}
           </ul>
         </details>
+      )}
+
+      {viewingDocId && (
+        <DocWindowsView
+          repo={repo}
+          docId={viewingDocId}
+          docName={docNameById.get(viewingDocId) ?? viewingDocId}
+          coverage={graph?.docCoverage?.[viewingDocId]}
+          onClose={() => setViewingDocId(null)}
+        />
       )}
 
       {view && nodeCount > 0 && (
@@ -215,7 +313,11 @@ export function GraphPanel({ repo }: { repo: string }) {
           <p class="settings-note" style={{ marginTop: '6px' }}>
             {nodeCount} entities · {edgeCount} relationships · {communities.length} themes
             {processed < docCount ? ` · ${processed}/${docCount} docs processed` : ''}
+            {graph?.coverageMode ? ` · ${graph.coverageMode} coverage` : ' · legacy coverage'}
+            {totalWindows > selectedWindows ? ` · ${selectedWindows}/${totalWindows} windows selected` : ''}
+            {pendingWindows > 0 ? ` · ${pendingWindows} window(s) pending` : ''}
           </p>
+          <p class="settings-note">Concept map shows {Math.min(MAP_NODES, nodeCount)} of {nodeCount} entities, ranked by connectivity.</p>
           <svg
             viewBox={`0 0 ${SIZE} ${SIZE}`}
             style={{ width: '100%', maxWidth: `${SIZE}px`, height: 'auto', display: 'block', margin: '4px auto' }}
@@ -241,6 +343,34 @@ export function GraphPanel({ repo }: { repo: string }) {
               );
             })}
           </svg>
+
+          <details style={{ marginTop: '6px' }}>
+            <summary class="settings-note" style={{ cursor: 'pointer' }}>Browse all {nodeCount} entities</summary>
+            <input
+              class="input"
+              type="search"
+              value={entityQuery}
+              placeholder="Filter entities"
+              onInput={(event) => setEntityQuery((event.currentTarget as HTMLInputElement).value)}
+              style={{ width: '100%', margin: '6px 0' }}
+            />
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+              {matchingNodes.slice(0, 100).map((node) => {
+                const ci = comIdx.get(node.id);
+                return (
+                  <button
+                    key={node.id}
+                    class="btn btn-small"
+                    style={{ borderLeft: `3px solid ${colorForIndex(ci)}` }}
+                    onClick={() => selectNode(node, ci)}
+                  >
+                    {node.label}
+                  </button>
+                );
+              })}
+            </div>
+            {matchingNodes.length > 100 && <p class="settings-note">Showing 100 matches. Refine the filter to narrow the list.</p>}
+          </details>
 
           {communities.length > 0 && (
             <div style={{ marginTop: '8px' }}>

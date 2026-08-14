@@ -471,7 +471,14 @@ export async function groupTitleTaken(name: string): Promise<boolean> {
   }
 }
 
-export async function readTabGroup(name: string | undefined, groupId: number | null): Promise<string> {
+export interface TabGroupReadResult {
+  error?: string;
+  group?: string;
+  count?: number;
+  results?: PageContent[];
+}
+
+export async function readTabGroup(name: string | undefined, groupId: number | null): Promise<TabGroupReadResult> {
   let targetId = groupId ?? undefined;
   if (name) {
     const lower = name.toLowerCase();
@@ -485,24 +492,18 @@ export async function readTabGroup(name: string | undefined, groupId: number | n
     }
   }
   if (targetId === undefined) {
-    return JSON.stringify({ error: `No tab group${name ? ` named "${name}"` : ''} found.` });
+    return { error: `No tab group${name ? ` named "${name}"` : ''} found.` };
   }
   const tabs = await chrome.tabs.query({ groupId: targetId });
-  if (tabs.length === 0) return JSON.stringify({ error: 'That tab group has no tabs.' });
+  if (tabs.length === 0) return { error: 'That tab group has no tabs.' };
   const results = await Promise.all(
     tabs.filter((t) => t.id !== undefined).map((t) => getTabContent(t.id!)),
   );
-  return JSON.stringify({
+  return {
     group: name,
     count: results.length,
-    results: results.map((c) => ({
-      tabId: c.tabId,
-      url: c.url,
-      title: c.title,
-      extractionStatus: c.extractionStatus,
-      text: c.text.slice(0, 6000),
-    })),
-  });
+    results,
+  };
 }
 
 export async function getElementMap(tabId: number): Promise<ElementRef[]> {
@@ -763,7 +764,11 @@ export async function readPdf(tabId: number | undefined, url: string | undefined
     charCount: result.charCount,
     truncated: result.truncated,
     note: result.truncated
-      ? `Only the first ~${READ_PDF_CONTEXT_CHARS.toLocaleString()} characters are shown (full document is ${result.charCount?.toLocaleString()} chars). To search the entire PDF, ingest it with add_to_repo and query it with search_repo.`
+      ? `Only the first ~${READ_PDF_CONTEXT_CHARS.toLocaleString()} characters are shown (${
+          result.charCountExact === false
+            ? `the document has more than ${result.charCount?.toLocaleString()} chars`
+            : `full document is ${result.charCount?.toLocaleString()} chars`
+        }). To search the entire PDF, ingest it with add_to_repo and query it with search_repo.`
       : undefined,
     text: result.text,
   });
@@ -802,7 +807,11 @@ export async function readOfficeDocument(
     charCount: result.charCount,
     truncated: result.truncated,
     note: result.truncated
-      ? `Only the first ~${READ_DOC_CONTEXT_CHARS.toLocaleString()} characters are shown (full document is ${result.charCount?.toLocaleString()} chars). To search the entire document, ingest it with add_to_repo and query it with search_repo.`
+      ? `Only the first ~${READ_DOC_CONTEXT_CHARS.toLocaleString()} characters are shown (${
+          result.charCountExact === false
+            ? `the document has more than ${result.charCount?.toLocaleString()} chars`
+            : `full document is ${result.charCount?.toLocaleString()} chars`
+        }). To search the entire document, ingest it with add_to_repo and query it with search_repo.`
       : undefined,
     text: result.text,
   });

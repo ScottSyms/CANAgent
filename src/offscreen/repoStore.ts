@@ -5,6 +5,7 @@
 import type { ExportedRepo, RepoKind } from '../shared/messages';
 import type { NotebookOverview, StudioDoc } from '../shared/types';
 import type { DocGraph } from '../shared/docGraph';
+import { rankGraphEvidence } from '../shared/graphRetrieval';
 import { hybridSearch, multiHybridSearch } from '../shared/hybridSearch';
 import { buildKeywordIndex, extendKeywordIndex, type KeywordIndex } from '../shared/keywordSearch';
 import { normalizeVector, quantizeVector, searchVectors, type ChunkInput, type SearchHit } from '../shared/vectorSearch';
@@ -67,8 +68,10 @@ interface RepoMeta {
   chunkCount: number;
   /** Source family for the repository. */
   kind?: RepoKind;
-  /** Embedder identity (e.g. `local:Xenova/all-MiniLM-L6-v2`) the vectors were built with. */
+  /** Embedder identity (e.g. `local:all-MiniLM-L6-v2-litert`) the vectors were built with. */
   embedModel?: string;
+  /** Monotonic content revision. Absent on legacy repositories means revision 0. */
+  corpusRevision?: number;
 }
 
 interface ChunkRec {
@@ -82,6 +85,35 @@ interface ChunkRec {
    * `enrichChunks`. Offsets are into `text`; the sentence text is not duplicated.
    */
   sentences?: CitableSentence[];
+}
+
+interface RepoSearchData {
+  revision: number;
+  chunkCount: number;
+  meta: RepoMeta;
+  vectors: Int8Array;
+  chunks: ReturnType<typeof enrichChunks>;
+  keywordIndex: KeywordIndex;
+  /**
+   * Lazily-loaded graph for this corpus revision. `undefined` = not yet
+   * attempted; `null` = attempted and there is no (or a stale) graph. Once
+   * set, reused across every `repoSearch` call at this revision instead of
+   * re-reading + re-decrypting `graph.json` from OPFS every time.
+   */
+  graph?: DocGraph | null;
+}
+
+const SEARCH_DATA_CACHE_LIMIT = 3;
+const searchDataCache = new Map<string, RepoSearchData>();
+
+function cacheSearchData(repo: string, data: RepoSearchData): void {
+  searchDataCache.delete(repo);
+  searchDataCache.set(repo, data);
+  while (searchDataCache.size > SEARCH_DATA_CACHE_LIMIT) {
+    const oldest = searchDataCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    searchDataCache.delete(oldest);
+  }
 }
 
 /**
@@ -148,6 +180,21 @@ async function writeJson(dir: FileSystemDirectoryHandle, file: string, obj: unkn
   await w.close();
 }
 
+function corpusRevision(meta: RepoMeta): number {
+  return meta.corpusRevision ?? 0;
+}
+
+async function invalidateGraphArtifacts(dir: FileSystemDirectoryHandle): Promise<void> {
+  for (const file of ['graph.json', 'studio.json']) {
+    try {
+      await dir.removeEntry(file);
+    } catch {
+      // Missing artifacts are expected. Revision checks still hide a file if an
+      // underlying filesystem error prevents best-effort removal.
+    }
+  }
+}
+
 async function readVectors(dir: FileSystemDirectoryHandle): Promise<Int8Array> {
   try {
     const handle = await dir.getFileHandle('vectors.bin');
@@ -198,16 +245,30 @@ async function appendKeywordIndex(
   await writeJson(dir, 'keywordIndex.json', next);
 }
 
-export async function repoAdd(
+export interface RepoAddDoc {
+  doc: { name: string; url: string };
+  chunks: string[];
+  vectors: number[][];
+  docExtra?: DocExtra;
+  docId?: string;
+}
+
+export type RepoAddResult = { ok: true; docId: string; chunkCount: number } | { ok: false; error: string };
+
+/**
+ * Add one or more documents to a repository in a single pass: `meta.json`,
+ * `chunks.json`, and `keywordIndex.json` are each read and rewritten exactly
+ * once for the whole batch, and `vectors.bin` gets one combined append —
+ * instead of the O(corpus size) read+rewrite that adding N documents one at a
+ * time (via N separate `repoAdd` calls) repeats N times, which is O(N²) total
+ * over a folder sync. `repoAdd` below is just `repoAddBatch` with one entry.
+ */
+export async function repoAddBatch(
   repo: string,
-  doc: { name: string; url: string },
-  chunks: string[],
-  vectors: number[][],
-  opts: { embedModel?: string; kind?: RepoKind; docExtra?: DocExtra; docId?: string } = {},
-): Promise<{ docId: string; chunkCount: number }> {
-  if (chunks.length === 0 || vectors.length !== chunks.length) {
-    throw new Error('repoAdd: chunk/vector count mismatch.');
-  }
+  docs: RepoAddDoc[],
+  opts: { embedModel?: string; kind?: RepoKind } = {},
+): Promise<RepoAddResult[]> {
+  if (docs.length === 0) return [];
   await assertVaultUsable();
   const dir = await repoDir(repo);
   const meta = await readJson<RepoMeta>(dir, 'meta.json', {
@@ -223,57 +284,114 @@ export async function repoAdd(
   if (opts.embedModel) {
     if (!meta.embedModel || meta.chunkCount === 0) meta.embedModel = opts.embedModel;
     else if (meta.embedModel !== opts.embedModel) {
-      throw new Error(
-        `Repo "${repo}" was built with embedder "${meta.embedModel}" but this add uses "${opts.embedModel}". Re-index the repo to switch embedders.`,
-      );
+      const error = `Repo "${repo}" was built with embedder "${meta.embedModel}" but this add uses "${opts.embedModel}". Re-index the repo to switch embedders.`;
+      return docs.map(() => ({ ok: false, error }));
     }
   }
   if (opts.kind && (!meta.kind || meta.chunkCount === 0)) meta.kind = opts.kind;
-  const normed = vectors.map(normalizeVector);
-  if (meta.dim === 0) {
-    meta.dim = normed[0].length;
-    const scale = new Array(meta.dim).fill(0);
-    for (const v of normed) for (let d = 0; d < meta.dim; d++) scale[d] = Math.max(scale[d], Math.abs(v[d]));
-    meta.perDimScale = scale.map((s) => s || 1);
-  }
-  if (normed[0].length !== meta.dim) {
-    throw new Error(`Embedding dimension ${normed[0].length} does not match repo dimension ${meta.dim}.`);
-  }
-
-  const packed = new Int8Array(normed.length * meta.dim);
-  normed.forEach((v, i) => packed.set(quantizeVector(v, meta.perDimScale), i * meta.dim));
-  await appendVectors(dir, packed);
 
   const allChunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
   const previousChunkCount = allChunks.length;
-  const docId = opts.docId ?? `doc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-  // localChunkIdx is the chunk's position within this document, so sentence ids
-  // are stable regardless of where the doc lands in the repo.
-  const newChunks = chunks.map((text, localIdx) => ({
-    docId,
-    name: doc.name,
-    url: doc.url,
-    text,
-    sentences: citableSentences(docId, localIdx, text),
-  }));
-  allChunks.push(...newChunks);
-  await writeJson(dir, 'chunks.json', allChunks);
-  await appendKeywordIndex(dir, previousChunkCount, newChunks, allChunks);
+  const newChunksAllDocs: ChunkRec[] = [];
+  const packedBatches: Int8Array[] = [];
+  const results: RepoAddResult[] = [];
+  let anyAdded = false;
 
-  meta.docs.push({
-    id: docId,
-    name: doc.name,
-    url: doc.url,
-    capturedAt: new Date().toISOString(),
-    chunkStart: meta.chunkCount,
-    chunkCount: chunks.length,
-    ...(opts.docExtra?.path !== undefined ? { path: opts.docExtra.path } : {}),
-    ...(opts.docExtra?.mtime !== undefined ? { mtime: opts.docExtra.mtime } : {}),
-    ...(opts.docExtra?.size !== undefined ? { size: opts.docExtra.size } : {}),
-  });
-  meta.chunkCount += chunks.length;
+  for (const entry of docs) {
+    if (entry.chunks.length === 0 || entry.vectors.length !== entry.chunks.length) {
+      results.push({ ok: false, error: 'repoAdd: chunk/vector count mismatch.' });
+      continue;
+    }
+    const normed = entry.vectors.map(normalizeVector);
+    if (meta.dim === 0) {
+      meta.dim = normed[0].length;
+      const scale = new Array(meta.dim).fill(0);
+      for (const v of normed) for (let d = 0; d < meta.dim; d++) scale[d] = Math.max(scale[d], Math.abs(v[d]));
+      meta.perDimScale = scale.map((s) => s || 1);
+    }
+    if (normed[0].length !== meta.dim) {
+      results.push({ ok: false, error: `Embedding dimension ${normed[0].length} does not match repo dimension ${meta.dim}.` });
+      continue;
+    }
+
+    const packed = new Int8Array(normed.length * meta.dim);
+    normed.forEach((v, i) => packed.set(quantizeVector(v, meta.perDimScale), i * meta.dim));
+    packedBatches.push(packed);
+
+    const docId = entry.docId ?? `doc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    // localChunkIdx is the chunk's position within this document, so sentence
+    // ids are stable regardless of where the doc lands in the repo.
+    const newChunks = entry.chunks.map((text, localIdx) => ({
+      docId,
+      name: entry.doc.name,
+      url: entry.doc.url,
+      text,
+      sentences: citableSentences(docId, localIdx, text),
+    }));
+    newChunksAllDocs.push(...newChunks);
+    allChunks.push(...newChunks);
+
+    meta.docs.push({
+      id: docId,
+      name: entry.doc.name,
+      url: entry.doc.url,
+      capturedAt: new Date().toISOString(),
+      chunkStart: meta.chunkCount,
+      chunkCount: entry.chunks.length,
+      ...(entry.docExtra?.path !== undefined ? { path: entry.docExtra.path } : {}),
+      ...(entry.docExtra?.mtime !== undefined ? { mtime: entry.docExtra.mtime } : {}),
+      ...(entry.docExtra?.size !== undefined ? { size: entry.docExtra.size } : {}),
+    });
+    meta.chunkCount += entry.chunks.length;
+    results.push({ ok: true, docId, chunkCount: meta.chunkCount });
+    anyAdded = true;
+  }
+
+  if (!anyAdded) return results;
+
+  const totalVectorLen = packedBatches.reduce((n, p) => n + p.length, 0);
+  const combined = new Int8Array(totalVectorLen);
+  let off = 0;
+  for (const p of packedBatches) {
+    combined.set(p, off);
+    off += p.length;
+  }
+  await appendVectors(dir, combined);
+  await writeJson(dir, 'chunks.json', allChunks);
+  await appendKeywordIndex(dir, previousChunkCount, newChunksAllDocs, allChunks);
+
+  meta.corpusRevision = corpusRevision(meta) + 1;
   await writeJson(dir, 'meta.json', meta);
-  return { docId, chunkCount: meta.chunkCount };
+  // Deliberately does NOT invalidate (delete) graph.json/studio.json here.
+  // Adding a document only ever grows the corpus, and buildRepoGraph's own
+  // per-document coverage tracking (content-hash gated, see graphExtract.ts)
+  // already handles "this doc is new/changed" incrementally — it would just
+  // see the new doc as pending work on the next build. Deleting the whole
+  // graph on every add destroyed potentially hours of prior extraction work
+  // for no benefit: repoGraphGet/repoStudioGet already refuse to serve a
+  // graph/studio whose corpusRevision is behind the repo's current one (their
+  // own staleness gate, unchanged), so nothing stale is served live — but the
+  // file survives to be built on, and to be included in an archive export.
+  searchDataCache.delete(repo);
+  return results;
+}
+
+export async function repoAdd(
+  repo: string,
+  doc: { name: string; url: string },
+  chunks: string[],
+  vectors: number[][],
+  opts: { embedModel?: string; kind?: RepoKind; docExtra?: DocExtra; docId?: string } = {},
+): Promise<{ docId: string; chunkCount: number }> {
+  if (chunks.length === 0 || vectors.length !== chunks.length) {
+    throw new Error('repoAdd: chunk/vector count mismatch.');
+  }
+  const [result] = await repoAddBatch(repo, [{ doc, chunks, vectors, docExtra: opts.docExtra, docId: opts.docId }], {
+    embedModel: opts.embedModel,
+    kind: opts.kind,
+  });
+  if (!result.ok) throw new Error(result.error);
+  return { docId: result.docId, chunkCount: result.chunkCount };
 }
 
 export async function repoSearch(
@@ -281,12 +399,21 @@ export async function repoSearch(
   queryVector: number[],
   k: number,
   embedModel?: string,
-  opts: { query?: string; hybrid?: boolean; queryVectors?: number[][]; queries?: string[] } = {},
-): Promise<{ results: SearchHit[] }> {
+  opts: { query?: string; hybrid?: boolean; graphAssist?: boolean; queryVectors?: number[][]; queries?: string[] } = {},
+): Promise<{
+  results: SearchHit[];
+  diagnostics: {
+    graphStatus: 'used' | 'disabled' | 'hybrid_disabled' | 'no_graph' | 'stale_graph' | 'no_match';
+    graphRankingCount: number;
+    graphCandidateCount: number;
+  };
+}> {
   await assertVaultUsable();
   const dir = await repoDir(repo);
   const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
-  if (!meta || meta.chunkCount === 0) return { results: [] };
+  if (!meta || meta.chunkCount === 0) {
+    return { results: [], diagnostics: { graphStatus: 'no_graph', graphRankingCount: 0, graphCandidateCount: 0 } };
+  }
   // Model lock: a query embedded by a different model can't be compared to the
   // stored vectors. Fail loudly so the caller re-indexes rather than returning junk.
   if (embedModel && meta.embedModel && meta.embedModel !== embedModel) {
@@ -294,28 +421,64 @@ export async function repoSearch(
       `Repo "${repo}" was built with embedder "${meta.embedModel}" but the query used "${embedModel}". Re-index the repo (or switch the embedder back) to search it.`,
     );
   }
-  const vectors = await readVectors(dir);
-  const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
-  const keywordIndex = await readOrBuildKeywordIndex(dir, chunks);
+  const revision = corpusRevision(meta);
+  let cached = searchDataCache.get(repo);
+  if (!cached || cached.revision !== revision || cached.chunkCount !== meta.chunkCount) {
+    const vectors = await readVectors(dir);
+    const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
+    const keywordIndex = await readOrBuildKeywordIndex(dir, chunks);
+    cached = { revision, chunkCount: meta.chunkCount, meta, vectors, chunks: enrichChunks(meta, chunks), keywordIndex };
+    cacheSearchData(repo, cached);
+  } else {
+    // Refresh LRU order on use.
+    cacheSearchData(repo, cached);
+  }
+  const { vectors, chunks: enrichedChunks, keywordIndex } = cached;
   const base = {
     dim: meta.dim,
     perDimScale: meta.perDimScale,
     chunkCount: meta.chunkCount,
     vectors,
     // Attach chunkId + sentence spans so hits carry provenance to the agent.
-    chunks: enrichChunks(meta, chunks),
+    chunks: enrichedChunks,
     k,
   };
   // Hybrid (semantic + BM25, RRF-fused) when enabled and the raw query is known;
   // otherwise pure semantic. The query text is only present on the hybrid path.
   const queryVectors = opts.queryVectors?.length ? opts.queryVectors : [queryVector];
   const queries = opts.queries?.length ? opts.queries : opts.query ? [opts.query] : [];
-  const results = queryVectors.length > 1 || queries.length > 1
-    ? multiHybridSearch({ ...base, queryVectors, queries, hybrid: opts.hybrid !== false, keywordIndex })
+  const multiQuery = queryVectors.length > 1 || queries.length > 1;
+  const hybridEnabled = multiQuery ? opts.hybrid !== false : opts.hybrid === true && !!opts.query;
+  const graphEnabled = opts.graphAssist !== false && hybridEnabled;
+  if (graphEnabled && cached.graph === undefined) {
+    cached.graph = await readJson<DocGraph | null>(dir, 'graph.json', null);
+  }
+  const storedGraph = graphEnabled ? (cached.graph ?? null) : null;
+  const graph = storedGraph && (storedGraph.corpusRevision ?? 0) === corpusRevision(meta) ? storedGraph : null;
+  const supplementalRankings = graph
+    ? queries.map((q) => rankGraphEvidence(graph, q, enrichedChunks)).filter((ranking) => ranking.length > 0)
+    : [];
+  let graphStatus: 'used' | 'disabled' | 'hybrid_disabled' | 'no_graph' | 'stale_graph' | 'no_match';
+  if (opts.graphAssist === false) graphStatus = 'disabled';
+  else if (!hybridEnabled) graphStatus = 'hybrid_disabled';
+  else if (!storedGraph) graphStatus = 'no_graph';
+  else if (!graph) graphStatus = 'stale_graph';
+  else if (supplementalRankings.length === 0) graphStatus = 'no_match';
+  else graphStatus = 'used';
+  const graphCandidateCount = new Set(supplementalRankings.flatMap((ranking) => ranking.map(({ i }) => i))).size;
+  const results = multiQuery
+    ? multiHybridSearch({ ...base, queryVectors, queries, hybrid: opts.hybrid !== false, keywordIndex, supplementalRankings })
     : opts.hybrid && opts.query
-      ? hybridSearch({ ...base, queryVector, query: opts.query, keywordIndex })
+      ? hybridSearch({ ...base, queryVector, query: opts.query, keywordIndex, supplementalRankings })
       : searchVectors({ ...base, queryVector });
-  return { results };
+  return {
+    results,
+    diagnostics: {
+      graphStatus,
+      graphRankingCount: supplementalRankings.length,
+      graphCandidateCount,
+    },
+  };
 }
 
 /**
@@ -348,6 +511,7 @@ export async function repoList(): Promise<
 export async function repoDelete(repo: string): Promise<void> {
   const dir = await reposDir();
   await dir.removeEntry(repo, { recursive: true });
+  searchDataCache.delete(repo);
 }
 
 // ----- backup / restore -----
@@ -368,7 +532,74 @@ function b64ToU8(b64: string): Uint8Array {
   return u8;
 }
 
-/** Serialize every repository (meta + chunks + base64 vectors) for backup. */
+/** Serialize one repository with all metadata, chunks, vectors, overview, graph, and studio. */
+export async function repoExportOne(repo: string): Promise<ExportedRepo | null> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) return null;
+  const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
+  const vecs = await readVectors(dir);
+  const bytes = new Uint8Array(vecs.buffer, vecs.byteOffset, vecs.byteLength);
+
+  const notebook = await readJson<unknown>(dir, 'notebook.json', null);
+  // Export whatever is stored, even if its corpusRevision predates the repo's
+  // current one (e.g. a document was added after the graph/studio were last
+  // built) — an archive exists to preserve the user's generated work, and
+  // silently dropping it here on every subsequent export looks like data
+  // loss. Staleness relative to the current corpus is already detected and
+  // surfaced at *use* time (repoSearch's graphEnabled check, repoGraphGet,
+  // GraphPanel's coverage display) via the corpusRevision each artifact
+  // already carries with it, so it's safe — and correct — to carry the
+  // artifact through unconditionally here.
+  const graph = await readJson<DocGraph | null>(dir, 'graph.json', null);
+  const studio = await readJson<StudioDoc | null>(dir, 'studio.json', null);
+
+  return {
+    name: repo,
+    meta,
+    chunks,
+    vectorsB64: u8ToB64(bytes),
+    ...(notebook ? { notebook } : {}),
+    ...(graph ? { graph } : {}),
+    ...(studio ? { studio } : {}),
+  };
+}
+
+/** Import one repository archive file into OPFS under targetName || repoData.name. */
+export async function repoImportOne(repoData: ExportedRepo, targetName?: string): Promise<{ ok: boolean; name: string }> {
+  await assertVaultUsable();
+  if (!repoData?.meta || !repoData?.name) return { ok: false, name: '' };
+  const name = (targetName || repoData.name).trim();
+  if (!name) return { ok: false, name: '' };
+
+  const root = await reposDir();
+  try {
+    await root.removeEntry(name, { recursive: true });
+  } catch {
+    // no existing repo by that name
+  }
+
+  const d = await root.getDirectoryHandle(name, { create: true });
+
+  // Update meta.name to match destination name
+  const meta = typeof repoData.meta === 'object' && repoData.meta ? { ...repoData.meta, name } : repoData.meta;
+
+  await writeJson(d, 'meta.json', meta);
+  await writeJson(d, 'chunks.json', Array.isArray(repoData.chunks) ? repoData.chunks : []);
+  await rebuildKeywordIndex(d, Array.isArray(repoData.chunks) ? (repoData.chunks as ChunkRec[]) : []);
+  const u8 = b64ToU8(repoData.vectorsB64 ?? '');
+  await writeVectors(d, new Int8Array(u8.buffer, u8.byteOffset, u8.byteLength));
+
+  if (repoData.notebook) await writeJson(d, 'notebook.json', repoData.notebook);
+  if (repoData.graph) await writeJson(d, 'graph.json', repoData.graph);
+  if (repoData.studio) await writeJson(d, 'studio.json', repoData.studio);
+
+  searchDataCache.delete(name);
+  return { ok: true, name };
+}
+
+/** Serialize every repository (meta + chunks + base64 vectors + artifacts) for backup. */
 export async function repoExportAll(): Promise<ExportedRepo[]> {
   await assertVaultUsable(); // export decrypts chunk text, so needs the vault unlocked
   const out: ExportedRepo[] = [];
@@ -376,13 +607,8 @@ export async function repoExportAll(): Promise<ExportedRepo[]> {
   // @ts-expect-error - entries() exists on FileSystemDirectoryHandle in Chrome
   for await (const [name, handle] of dir.entries()) {
     if (handle.kind !== 'directory') continue;
-    const d = handle as FileSystemDirectoryHandle;
-    const meta = await readJson<RepoMeta | null>(d, 'meta.json', null);
-    if (!meta) continue;
-    const chunks = await readJson<ChunkRec[]>(d, 'chunks.json', []);
-    const vecs = await readVectors(d);
-    const bytes = new Uint8Array(vecs.buffer, vecs.byteOffset, vecs.byteLength);
-    out.push({ name, meta, chunks, vectorsB64: u8ToB64(bytes) });
+    const exp = await repoExportOne(name);
+    if (exp) out.push(exp);
   }
   return out;
 }
@@ -390,22 +616,11 @@ export async function repoExportAll(): Promise<ExportedRepo[]> {
 /** Restore repositories from a backup, overwriting any with the same name. */
 export async function repoImportAll(repos: ExportedRepo[]): Promise<{ imported: number }> {
   await assertVaultUsable(); // import re-encrypts chunk text under the active vault
-  const root = await reposDir();
   let imported = 0;
   for (const r of repos) {
     if (!r?.name) continue;
-    try {
-      await root.removeEntry(r.name, { recursive: true });
-    } catch {
-      // no existing repo by that name
-    }
-    const d = await root.getDirectoryHandle(r.name, { create: true });
-    await writeJson(d, 'meta.json', r.meta);
-    await writeJson(d, 'chunks.json', Array.isArray(r.chunks) ? r.chunks : []);
-    await rebuildKeywordIndex(d, Array.isArray(r.chunks) ? (r.chunks as ChunkRec[]) : []);
-    const u8 = b64ToU8(r.vectorsB64 ?? '');
-    await writeVectors(d, new Int8Array(u8.buffer, u8.byteOffset, u8.byteLength));
-    imported++;
+    const res = await repoImportOne(r);
+    if (res.ok) imported++;
   }
   return { imported };
 }
@@ -458,7 +673,10 @@ export async function repoDeleteDoc(repo: string, docId: string): Promise<{ remo
     meta.perDimScale = [];
     meta.embedModel = undefined;
   }
+  meta.corpusRevision = corpusRevision(meta) + 1;
   await writeJson(dir, 'meta.json', meta);
+  await invalidateGraphArtifacts(dir);
+  searchDataCache.delete(repo);
   return { removed: doc.chunkCount, chunkCount: meta.chunkCount };
 }
 
@@ -505,18 +723,63 @@ export async function repoNotebookSample(
 
 // ----- document knowledge graph (per-notebook GraphRAG) -----
 
+/** Atomically capture the document catalogue and corpus revision for a graph build. */
+export async function repoGraphSnapshot(
+  repo: string,
+): Promise<{ docs: Array<{ id: string; name: string }>; corpusRevision: number }> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) return { docs: [], corpusRevision: 0 };
+  return {
+    docs: meta.docs.map((d) => ({ id: d.id, name: d.name })),
+    corpusRevision: corpusRevision(meta),
+  };
+}
+
 /** Read the extracted knowledge graph for a repo (null if none). Encrypted at rest. */
 export async function repoGraphGet(repo: string): Promise<DocGraph | null> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  const [meta, graph] = await Promise.all([
+    readJson<RepoMeta | null>(dir, 'meta.json', null),
+    readJson<DocGraph | null>(dir, 'graph.json', null),
+  ]);
+  if (!meta || !graph || (graph.corpusRevision ?? 0) !== corpusRevision(meta)) return null;
+  return graph;
+}
+
+/**
+ * Read the extracted knowledge graph regardless of whether it's stale
+ * relative to the repo's current corpusRevision (null only when there's
+ * genuinely no graph.json). `repoGraphGet`'s staleness gate is correct for
+ * live search/UI use — a stale graph shouldn't silently back a citation or
+ * concept map — but `buildRepoGraph` needs the *actual* stored graph to
+ * resume its incremental, per-document progress (docCoverage) on top of.
+ * Reading through the gated getter there would make every rebuild after any
+ * corpus change discard all prior extraction work and start over.
+ */
+export async function repoGraphGetRaw(repo: string): Promise<DocGraph | null> {
   await assertVaultUsable();
   const dir = await repoDir(repo);
   return readJson<DocGraph | null>(dir, 'graph.json', null);
 }
 
-/** Persist the extracted knowledge graph for a repo. */
-export async function repoGraphSet(repo: string, graph: DocGraph): Promise<void> {
+/** Persist a graph only if the repository still matches the build's snapshot. */
+export async function repoGraphSet(repo: string, graph: DocGraph, expectedRevision: number): Promise<void> {
   await assertVaultUsable();
   const dir = await repoDir(repo);
-  await writeJson(dir, 'graph.json', graph);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) throw new Error(`Repository "${repo}" no longer exists.`);
+  const current = corpusRevision(meta);
+  if (current !== expectedRevision) {
+    throw new Error('Repository changed while the graph was being built. Rebuild the graph.');
+  }
+  await writeJson(dir, 'graph.json', { ...graph, corpusRevision: current });
+  // The corpus revision is unchanged (only the graph itself was (re)built), so
+  // the revision check in repoSearch's cache wouldn't otherwise notice — drop
+  // the cached search data so the next search picks up the new graph.
+  searchDataCache.delete(repo);
 }
 
 /**
@@ -540,18 +803,53 @@ export async function repoDocChunks(
     .map((c) => ({ chunkId: c.chunkId ?? '', text: c.text, sentences: c.sentences ?? [] }));
 }
 
+/**
+ * One document's already-computed embedding vectors (from ingest — never
+ * re-embedded), plus the dequantization parameters needed to turn them back
+ * into cosine-comparable floats. Mirrors `repoDeleteDoc`'s slice-by-
+ * `chunkStart`/`chunkCount` read of `vectors.bin`. Used by the graph builder's
+ * embedding-cluster "Instant" tier so it needs zero new embedding calls.
+ */
+export async function repoDocVectors(
+  repo: string,
+  docId: string,
+): Promise<{ vectors: Int8Array; dim: number; perDimScale: number[] } | null> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) return null;
+  const doc = meta.docs.find((d) => d.id === docId);
+  if (!doc) return null;
+  const dim = meta.dim;
+  const vecs = await readVectors(dir);
+  const start = doc.chunkStart * dim;
+  const end = (doc.chunkStart + doc.chunkCount) * dim;
+  return { vectors: vecs.subarray(start, end), dim, perDimScale: meta.perDimScale };
+}
+
 // ----- notebook studio outputs (briefing / FAQ / study guide) -----
 
 /** Read all persisted studio outputs for a repo. */
 export async function repoStudioGet(repo: string): Promise<StudioDoc> {
   await assertVaultUsable();
   const dir = await repoDir(repo);
-  return readJson<StudioDoc>(dir, 'studio.json', { outputs: {} });
+  const [meta, doc] = await Promise.all([
+    readJson<RepoMeta | null>(dir, 'meta.json', null),
+    readJson<StudioDoc>(dir, 'studio.json', { outputs: {} }),
+  ]);
+  if (!meta || (doc.corpusRevision ?? 0) !== corpusRevision(meta)) return { outputs: {} };
+  return doc;
 }
 
-/** Persist all studio outputs for a repo. */
-export async function repoStudioSet(repo: string, doc: StudioDoc): Promise<void> {
+/** Persist Studio outputs only while their source graph revision is current. */
+export async function repoStudioSet(repo: string, doc: StudioDoc, expectedRevision: number): Promise<void> {
   await assertVaultUsable();
   const dir = await repoDir(repo);
-  await writeJson(dir, 'studio.json', doc);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) throw new Error(`Repository "${repo}" no longer exists.`);
+  const current = corpusRevision(meta);
+  if (current !== expectedRevision) {
+    throw new Error('Repository changed while the Studio output was being generated. Regenerate it.');
+  }
+  await writeJson(dir, 'studio.json', { ...doc, corpusRevision: current });
 }

@@ -562,26 +562,40 @@ sandbox can't write back in place, so creation is delivered as a download)
 
 ---
 
-## 7. LLM provider (`llmProvider.ts`)
+## 7. Multi-protocol LLM provider (`llmProvider.ts` & `./adapters/`)
 
-OpenAI-compatible. `complete()` POSTs `${baseUrl}/chat/completions` with the model,
-messages, `tools`, optional `temperature`/`max_tokens`, and supports multimodal
-user messages (`content` as an array of `{type:'text'}` / `{type:'image_url'}`
-parts — used for snapshots, full-page capture, and OCR ingestion). `embed()` POSTs
-`${baseUrl}/embeddings` with `model: settings.embeddingModel || settings.model` and
-parses `data[].embedding`. `testConnection()` validates base URL/key/model from the
-Settings screen. Non-2xx → typed `LlmError` surfaced to the user (e.g. a 403 from
-`/embeddings` means the chosen model isn't an embeddings model — tell the user to
-set the **Embedding model** field).
+Protocol-adapter pattern. `complete()` dispatches request-building and response-parsing
+to the adapter selected by `settings.protocol` (defaulting to `'chat-completions'`).
+Every adapter translates between the canonical `LlmMessage[]`/`ToolDefinition[]` shape
+and the wire format expected by the provider, so the agent loop and tool execution
+stay protocol-agnostic.
 
-**Azure OpenAI mode** is keyed entirely off `settings.apiVersion`: when set, every
-service appends `?api-version=<v>` to its request URL and authenticates with the
-`api-key` header instead of `Authorization: Bearer` (blank = standard OpenAI shape).
-Each service may still point at its own base URL/key. When `retryOnRateLimit` is on
-(default), `complete()`/`embed()` back off and retry transient failures (HTTP 429 and
-transient 5xx), honoring `Retry-After`, surfacing a notice via the `onRetry` callback.
-`transcribe()` POSTs `${baseUrl}/audio/transcriptions` for voice prompts (recorded by
-the microphone page) when a `transcriptionModel` is configured.
+**Protocols supported:**
+- **`chat-completions`** (`openaiChatAdapter.ts`): OpenAI, Azure OpenAI, DeepSeek, GLM,
+  MiniMax, Kimi, Ollama, vLLM, LM Studio. POSTs `${baseUrl}/chat/completions`.
+- **`responses`** (`openaiResponsesAdapter.ts`): OpenAI `/responses` API (GPT-5.x, Grok).
+  POSTs `${baseUrl}/responses` with `input` array of typed Items (`message`, `function_call`,
+  `function_call_output`).
+- **`anthropic-messages`** (`anthropicMessagesAdapter.ts`): Claude, Qwen `/v1/messages` API.
+  POSTs `${baseUrl}/v1/messages` with top-level `system` string, `x-api-key` + `anthropic-version`
+  headers, and `tool_use`/`tool_result` content blocks (merging consecutive tool results into
+  a single `user` turn).
+- **`gemini-native`** (`geminiNativeAdapter.ts`): Google Gemini `generateContent` API.
+  POSTs `${baseUrl}/v1beta/models/${model}:generateContent` with `contents`/`parts`,
+  `systemInstruction`, and `x-goog-api-key` header.
+
+**Tool schema translation (`adapters/toolSchema.ts`):** Converts canonical `ToolDefinition[]`
+into provider-native tool declarations (`input_schema` for Anthropic, `functionDeclarations`
+with stripped `additionalProperties` for Gemini, and flattened shapes for Responses).
+
+`embed()` POSTs `${baseUrl}/embeddings` with `model: settings.embeddingModel || settings.model` and
+parses `data[].embedding`. `testConnection()` validates connection credentials. Non-2xx → typed `LlmError`
+surfaced to the user.
+
+**Azure OpenAI mode** is keyed off `settings.apiVersion`: when set, standard OpenAI endpoints append
+`?api-version=<v>` and authenticate with `api-key`. When `retryOnRateLimit` is on (default), transient
+failures (HTTP 429 / 5xx) back off and retry with `Retry-After` hints. `transcribe()` POSTs
+`${baseUrl}/audio/transcriptions` for voice prompts when configured.
 
 ---
 
@@ -958,8 +972,8 @@ project exists).
 `background/llmProvider.ts` `resolveModelForRole`): routes background/utility
 LLM calls to a different named endpoint than the main chat model, without
 touching `complete()` itself or its ~11 existing call sites' positional
-arguments. `ModelRole` is `'main' | 'utility' | 'reflection' | 'plan' |
-'vision'`; `'main'` (the user-facing chat loop and its final answer,
+arguments. `ModelRole` is `'main' | 'utility' | 'knowledgeGraph' |
+'reflection' | 'plan' | 'vision'`; `'main'` (the user-facing chat loop and its final answer,
 `agentRuntime.ts` lines ~1766/1973) is never routed. `Settings.modelProfiles`
 holds named alternate endpoints (baseUrl/apiKey/model/apiVersion/temperature/
 maxTokens/`privacyTier`); `Settings.roleProfiles` maps a role to a profile id.
@@ -973,6 +987,9 @@ role:
 - `'utility'` — conversation title/summary, self-check verify gate, skill
   distillation, old-tool-output compaction (`summarizeEvicted`), RAG query
   paraphrase and rerank.
+- `'knowledgeGraph'` — entity/relationship extraction and graph community
+  summaries. An unassigned role inherits `'utility'`, then the main model, so
+  existing Utility-routed graph builds retain their behavior.
 - `'reflection'` — lesson-learning (`maybeLearnLesson`), memory extraction
   (`reflectMemories`), the merge-vs-supersede adjudication call.
 - `'plan'` — scoped multi-step research subtasks (`runScopedSubtask`).
@@ -1168,18 +1185,19 @@ drops the text into the composer. Enabled only when a `transcriptionModel` is se
 **Onboarding.** On first run with no endpoint configured, `OnboardingScreen.tsx`
 walks the user through setting a base URL / key / model before the chat is usable.
 
-**Workspace (full tab).** The sidebar's **Settings** gear opens `workspace.html`
-(`chrome.tabs.create`) — a management console that mirrors the conversation state
+**Workspace (full tab) & Notebooks Workspace.** The sidebar's **Settings** gear opens `workspace.html`
+(`chrome.tabs.create`) — a management console that mirrors conversation state
 over the same `Port` **and** is interactive: a **composer** sends `user_message`s like
-the side panel. Its nav gives every management surface a dedicated page — Knowledge,
-Memory, Skills, Tools, Models, Automations, Products, Settings — largely by reusing
-the sidebar's own section components rather than duplicating their logic (see
-`src/workspace/` above), plus panels too cramped for the side panel: a data/table
-viewer (`DataViewer`, over `export_data` results) and a full-size image viewer
-(`ImageViewer`). It shares the side panel's **brand theme**: the palette +
-light/dark variables live in `src/shared/theme.css`, imported by both `styles.css` and
-`workspace.css`, so the workspace renders in the same colours (gradient header, purple
-accents) and follows the OS light/dark setting.
+the side panel. Its nav gives management surfaces dedicated pages — Memory, Skills,
+Tools, Models, Automations, Products, Settings (language, playbook library, Backup & Restore) —
+and panels too cramped for the side panel: a data/table viewer (`DataViewer`, over `export_data`
+results) and a full-size image viewer (`ImageViewer`).
+
+Knowledge base management lives in its own dedicated **Notebooks Workspace** (`notebooks.html` / `NotebooksWorkspace.tsx`),
+accessed via the header's Knowledge icon or `#` composer mentions. It features a **Master-Detail NotebookLM layout**
+with two sub-tabs:
+- **Notebooks Tab:** Left master list for filtering and selecting repositories; right detail pane featuring sub-tabs for **📄 Overview** (with AI-generated all-encompassing title, key topic chips, and suggested questions), **🕸️ Concept Graph** (GraphRAG entity map and communities), **🎓 Studio Artifacts** (Briefing, FAQ, Study Guide), and **📁 Documents**. Includes 1-click **Export Knowledge Base (HTML)** (`exportKnowledgeBaseHtml`), which produces a standalone HTML dump with a Table of Contents, AI-generated title, ordered sections (Overview &rarr; Studio &rarr; Graph), and hyperlinked inline reference jump-links (`#ref-...`).
+- **Indexing Tab:** Integrated ingestion connectors for Local Files & Folders (`RepoUpload` + drag-and-drop), SharePoint / OneDrive libraries (`SharePointSection`), and Office 365 Mailboxes (`MailboxSection`).
 
 **Trust & auth model.** Capabilities carry a **trust level** and **auth method**, which
 flow into the approval gate: tools sourced from an `enterprise`/`local`-trust capability

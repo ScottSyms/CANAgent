@@ -32,6 +32,14 @@ import { buildResumePrompt, MAX_RECOVERY_ATTEMPTS, reconcileTabs, shouldAutoResu
 import { getVaultState } from './vault';
 import type { BackgroundEvent } from '../shared/messages';
 import { MEMORY_TOOL_DEFINITIONS, READ_ONLY_TOOLS, TOOL_DEFINITIONS } from '../shared/schemas';
+import {
+  sourcePolicyForRepos,
+  sourcePolicyPrompt,
+  sourceRepositoryAllowed,
+  sourceToolAllowed,
+  toolsForSourcePolicy,
+  type SourcePolicy,
+} from './sourcePolicy';
 import { LANGUAGE_STORAGE_KEY, resolveLang, translate, type LangPref } from '../sidebar/i18n';
 import type {
   AgentStatus,
@@ -80,18 +88,20 @@ import * as browser from './browserToolAdapter';
 import type { M365SearchFilters } from '../shared/microsoftSearch';
 import { captureFullPage } from './fullPageCapture';
 import { mcpCallTool, mcpListTools } from './mcpClient';
-import { complete, embedChunks, embedderId, LLM_TIMEOUT_MS, messagesContainImage, resolveModelForRole, type ContentPart, type LlmMessage, type LlmToolCall } from './llmProvider';
+import { complete, embedChunks, embedderId, LlmError, LLM_TIMEOUT_MS, messagesContainImage, resolveModelForRole, type ContentPart, type LlmMessage, type LlmToolCall } from './llmProvider';
 import { extractJsonObject, runScopedSubtask, type ScopedSubtaskInput } from './scopedSubtask';
 import { startJob } from './jobEngine';
 import { DEFAULT_RESEARCH_LIMITS } from '../shared/jobs';
 import { deriveStepBudget, findSimilarLesson, parseLesson, parseReflectionVerdict, parseSummaryArray, relevantLessons, repairToolPairing, withMergedSystemState } from './loopHelpers';
 import { generateDocument, generatePresentation, graphGet as repoGraphGet, productSave, repoDeleteDoc, repoDocs, repoList, repoSearch } from './offscreenClient';
 import { selectSubgraph, renderSubgraphForModel, type DocGraph } from '../shared/docGraph';
-import { renderCommunitiesForModel } from '../shared/graphCommunities';
+import { rankCommunities, renderCommunitiesForModel } from '../shared/graphCommunities';
 import { resolveSentenceCitations } from './sentenceResolve';
 import { normalizeSlides } from '../shared/slides';
 import type { SearchHit } from '../shared/vectorSearch';
-import { citationTokenRe } from '../shared/citations';
+import { assessRetrievalConfidence } from '../shared/retrievalConfidence';
+import { citationIdsInReference, citationTokenRe } from '../shared/citations';
+import { citableWebSource } from '../shared/webCitations';
 import { ingestTab } from './repoIngest';
 import { getAccessToken } from './graphAuth';
 import { graphGet, graphPostJson } from './graphClient';
@@ -317,7 +327,7 @@ function buildMentionDirective(
   const lines = mentions.map((m) => {
     const v = m.value.replace(/"/g, '');
     return m.kind === 'repo'
-      ? `- Local repository "${v}": call search_repo with repo="${v}" to answer this request; that repository is the intended source.`
+      ? `- Local repository "${v}": this is the exclusive source for the request. Use only its repository evidence unless the user explicitly approves a web fallback.`
       : `- Web page ${v}: open it with open_url (or navigate) and read it directly to answer — this is the exact page the user means; do not web-search for it.`;
   });
   return `\n\n[The user referenced these with @/# — act on them directly for this request:]\n${lines.join('\n')}`;
@@ -365,10 +375,10 @@ Working method:
 - Never open_url/navigate to a URL ending in .docx/.pptx/.xlsx/.pdf — the browser downloads the file and you get nothing useful. Pass that URL to read_office_document (Office) or read_pdf (PDF) instead.
 - To work with a video (YouTube or any captioned video on the page) — summarize it, answer about it, find a moment — call get_video_transcript; it reads the page's existing captions instantly. Do not try to watch or listen to the video. If it reports no captions, say so.
 - Some web pages expose their own in-page tools via WebMCP (navigator.modelContext). On the active tab, call list_webmcp_tools to discover them; when one matches the task, prefer call_webmcp_tool over hand-driving the page UI.
-- Local repositories: the user can save pages into named on-device repositories (OPFS). Use add_to_repo to capture the current page or this conversation's tab group into a repo, and search_repo to retrieve relevant passages from a repo and answer from them — cite each passage's page name and URL. Prefer search_repo for questions about pages the user has saved; list_repos shows what exists.
-- A repository may also have an extracted knowledge graph. For questions about how entities relate, who/what is connected, or that need facts spread across several documents (multi-hop), call search_graph on that repo before or alongside search_repo; it returns the relevant entities and relationships, each with [[sentence-id]] evidence. If it reports no graph has been built, fall back to search_repo.
-- For broad, corpus-level questions about a repository — "what are the main themes", "summarize this whole collection", "how does it all fit together" — call global_search on that repo: it returns the notebook's themes (graph communities) with [[sentence-id]] evidence to synthesize across. Use search_repo/search_graph for specific facts; use global_search for the big picture.
-- search_repo passages are returned as sentences each prefixed with a [[sentence-id]] token. When a statement in your answer is supported by a retrieved sentence, cite it inline by copying that sentence's [[sentence-id]] token verbatim immediately after the statement (e.g. "Model selection is done at the application level [[doc-73:c42:s4#8f31ca]]."). Cite only ids that appear in the current search results — never invent, guess, or reuse an id from earlier; unresolved ids are removed automatically. This is in addition to the Source tabs list, not a replacement.
+- Local repositories: the user can save pages into named on-device repositories (OPFS). Use add_to_repo to capture the current page or this conversation's tab group into a repo, and search_repo to retrieve relevant passages from a repo and answer from them. search_repo automatically fuses semantic, keyword, and fresh knowledge-graph evidence when available; prefer it for ordinary questions about saved pages. list_repos shows what exists.
+- For explicit graph-topology questions about how named entities connect, call search_graph; it returns a one-hop entity/relationship view with [[sentence-id]] evidence. Ordinary cross-document retrieval should start with search_repo because graph evidence is already fused there automatically.
+- For broad, corpus-level questions about a repository — "what are the main themes", "summarize this whole collection", "how does it all fit together" — call global_search on that repo: it returns up to five query-ranked graph communities with [[sentence-id]] evidence to synthesize across. Use search_repo/search_graph for specific facts; use global_search for the big picture.
+- Repository and webpage read tools return sentences prefixed with [[sentence-id]] tokens. When a statement is supported by a retrieved sentence, cite it inline by copying that token verbatim immediately after the statement (e.g. "Model selection is done at the application level [[doc-73:c42:s4#8f31ca]]."). Cite only ids supplied by tools in the current task — never invent, guess, or reuse an earlier id; unresolved ids are removed automatically. search_web/open_url navigation metadata is not evidence: read a destination with get_tab_content before citing it. Inline citations are in addition to the Source tabs list, not a replacement.
 - The user can reference a repository (typing #) or a bookmarked page (typing @) in their message; when they do, an explicit instruction is attached — act on it directly: search_repo that exact repository, or open and read that exact URL rather than web-searching for it.
 - Endpoint-first Microsoft 365 rule: for Outlook mail, Outlook calendar, Teams meeting, SharePoint, and OneDrive retrieval, ALWAYS use the dedicated endpoint-backed tools before browser/page automation. Do not use search_web, open_url, get_tab_content, Outlook/Office web UI playbooks, or DOM automation for these data sources unless the endpoint tool returns an explicit endpoint/auth error. Mail, calendar, and draft creation are backed by Microsoft Graph (OAuth) and need a one-time Connect in Settings → Knowledge bases → Mailbox; SharePoint/OneDrive files remain a direct cookie-session call needing no separate connect step.
 - For questions about the user's own Microsoft 365 email AND/OR files, call microsoft365_search first — source ('mail'|'files'|'both'), from (sender), fileType, sitePath, editedByMe, since/until (YYYY-MM-DD), orderBy ('relevance'|'date'), top. For mail-only questions, set source:'mail'. Mail search matches on subject and sender substrings plus a date range — it does not search the message body, so a body-only phrase may miss; prefer read_office_document/read_pdf-style narrowing (recipient, subject keyword, date window) over a vague free-text query. For SharePoint/OneDrive file questions, assume the user wants the most recently modified content files unless they explicitly ask otherwise: omit orderBy or use orderBy:'date', and do not search for executables/components (the tool defaults to Office docs, PDFs, text/html, images, audio, and video unless a fileType is supplied). E.g. "last five emails from Brian Ray" → {source:'mail', from:'Brian Ray', orderBy:'date', top:5}; "the last Word file I edited on my SharePoint site" → {source:'files', fileType:'docx', editedByMe:true, top:1}. Cite each result's url. If the response has a mailError, explain that the mailbox isn't connected (or the connection expired) and ask the user to open Settings → Mailbox → Connect, then retry; only then may you fall back to the /search-mail skill or Outlook web UI. To read a file's full contents beyond its snippet, pass its url to read_office_document (Office) or read_pdf (PDFs) — do not navigate to it (that downloads it).
@@ -568,6 +578,11 @@ export class AgentRuntime {
   // populates it; the final answer's [[id]] tokens are validated against it so only
   // genuinely-retrieved sentences can be cited (spec §6). Reset each user turn.
   private citationRegistry = new Map<string, Citation>();
+  private sourcePolicy: SourcePolicy = { mode: 'unrestricted' };
+  private repoSearchCache = new Map<string, string>();
+  private repoEvidenceStatus: 'unknown' | 'strong' | 'weak' | 'empty' = 'unknown';
+  private sourceNudgesDone = 0;
+  private webEvidenceRegistered = false;
   private canDistill = false;
   private lastUserText = '';
   private taskConversationStart = 0;
@@ -764,6 +779,25 @@ export class AgentRuntime {
     // agent acts on them directly (open that page / search that repo).
     const directive = buildMentionDirective(mentions);
     if (directive) taskText += directive;
+    const mentionedRepos = (mentions ?? []).filter((mention) => mention.kind === 'repo').map((mention) => mention.value.trim());
+    this.sourcePolicy = sourcePolicyForRepos(mentionedRepos);
+    if (mentionedRepos.length > 0) {
+      const listed = await repoList();
+      if (!listed.ok) {
+        this.emit({ type: 'error', message: `Could not validate the selected repository: ${listed.error}` });
+        return;
+      }
+      const names = new Set(
+        ((listed.result as Array<{ name?: string }> | undefined) ?? [])
+          .map((entry) => entry.name)
+          .filter((name): name is string => typeof name === 'string'),
+      );
+      const missing = mentionedRepos.filter((repo) => !names.has(repo));
+      if (missing.length > 0) {
+        this.emit({ type: 'error', message: `Repository not found: ${missing.join(', ')}` });
+        return;
+      }
+    }
 
     // Consume any pending snapshots: shown on the user's message and sent
     // to the model as image content parts.
@@ -825,6 +859,10 @@ export class AgentRuntime {
     this.planNudgesDone = 0;
     this.authResumedOrigins.clear();
     this.citationRegistry.clear();
+    this.repoSearchCache.clear();
+    this.repoEvidenceStatus = 'unknown';
+    this.sourceNudgesDone = 0;
+    this.webEvidenceRegistered = false;
     this.setDistill(false);
     this.emit({ type: 'plan_update', plan: null });
     this.taskConversationStart = this.conversation.length;
@@ -1056,6 +1094,9 @@ export class AgentRuntime {
         lastTaskUrl: this.lastTaskUrl || undefined,
         lastUserText: this.lastUserText,
         unattended: this.unattended,
+        ...(this.sourcePolicy.mode === 'repo_only'
+          ? { repoOnlyRepos: this.sourcePolicy.repos, webFallbackApproved: this.sourcePolicy.webApproved }
+          : {}),
         recoveryAttempts: this.recoveryAttempts,
         updatedAt: new Date().toISOString(),
       });
@@ -1151,6 +1192,8 @@ export class AgentRuntime {
     this.findings = cp.findings;
     this.lastTaskUrl = cp.lastTaskUrl ?? '';
     this.lastUserText = cp.lastUserText;
+    this.sourcePolicy = sourcePolicyForRepos(cp.repoOnlyRepos ?? []);
+    if (this.sourcePolicy.mode === 'repo_only') this.sourcePolicy.webApproved = cp.webFallbackApproved ?? false;
 
     let reconcileNote = '';
     try {
@@ -1185,6 +1228,10 @@ export class AgentRuntime {
     this.planNudgesDone = 0;
     this.authResumedOrigins.clear();
     this.citationRegistry.clear();
+    this.repoSearchCache.clear();
+    this.repoEvidenceStatus = 'unknown';
+    this.sourceNudgesDone = 0;
+    this.webEvidenceRegistered = false;
     this.setDistill(false);
     this.emit({ type: 'plan_update', plan: this.planView() });
     this.taskConversationStart = this.conversation.length;
@@ -1763,15 +1810,23 @@ export class AgentRuntime {
     // browser/network tool call can't be cancelled and may still be hanging.
     // Bumping the epoch orphans that loop (its eventual result is discarded),
     // so Stop / New chat always take effect even mid-tool.
-    if (this.running) {
+    const wasRunning = this.running;
+    if (wasRunning) {
       this.taskEpoch++;
       this.running = false;
       this.abortController = null;
-      if (this.status !== 'error') this.setStatus('idle');
+      for (const activity of this.activities) {
+        if (activity.status === 'running') this.finishActivity(activity, 'error', 'Task stopped by user.');
+      }
+      void clearCheckpoint();
+      this.setStatus('idle');
       this.notice('Task stopped.');
       // Snapshot the partial thread to History now (captures array refs
       // synchronously, so a following clearConversation can't blank it).
       void this.persistCurrentConversation();
+    } else if (this.status !== 'idle') {
+      // A stale uncancellable tool must never leave the panel permanently busy.
+      this.setStatus('idle');
     }
   }
 
@@ -2022,7 +2077,7 @@ export class AgentRuntime {
 
     // (Re)build the system message each task so directory/skill/memory edits apply immediately.
     const memoryEnabled = await getMemoryEnabled();
-    const tools = memoryEnabled ? [...TOOL_DEFINITIONS, ...MEMORY_TOOL_DEFINITIONS] : TOOL_DEFINITIONS;
+    const baseTools = memoryEnabled ? [...TOOL_DEFINITIONS, ...MEMORY_TOOL_DEFINITIONS] : TOOL_DEFINITIONS;
     const customInstructions = settings.systemPrompt?.trim()
       ? `\n\nUser instructions — the user has configured these standing instructions; follow them within the safety rules above:\n${settings.systemPrompt.trim()}`
       : '';
@@ -2062,6 +2117,7 @@ export class AgentRuntime {
       skillsPromptBlock(this.scopedSkills(await getSkills()), this.activeHost) +
       (memoryEnabled ? renderCoreMemoryBlock(this.memoryGraph, this.activeProjectId) + lessonsPromptBlock(lessonEntries) : '') +
       customInstructions;
+    this.systemBase += sourcePolicyPrompt(this.sourcePolicy);
     // Keep conversation[0] = the byte-stable system base (no volatile state).
     // The live working-state is folded into that system message only at call time
     // (see withWorkingState), so history remains free of volatile state.
@@ -2074,6 +2130,26 @@ export class AgentRuntime {
     const contextBlock = this.buildContextBlock();
     let textContent = contextBlock ? `${contextBlock}\n\n${userText}` : userText;
     if (navigationNotice) textContent = `${navigationNotice}${textContent}`;
+    if (this.sourcePolicy.mode === 'repo_only') {
+      this.notice(`Searching ${this.sourcePolicy.repos.map((repo) => `"${repo}"`).join(', ')} in repository-only mode.`);
+      const sections: string[] = [];
+      for (const repo of this.sourcePolicy.repos) {
+        const result = await this.executeToolCall(
+          {
+            id: `repo-preload-${crypto.randomUUID()}`,
+            type: 'function',
+            function: { name: 'search_repo', arguments: JSON.stringify({ repo, query: this.lastUserText }) },
+          },
+          epoch,
+          this.makeSignal(),
+        );
+        if (this.aborted(epoch)) return;
+        sections.push(`Repository: ${repo}\n${result}`);
+      }
+      textContent +=
+        '\n\n[Repository evidence was retrieved before this model call. Answer only from it and cite its [[sentence-id]] tokens. ' +
+        'Do not repeat the same search unless a materially different repository query is needed.]\n' + sections.join('\n\n');
+    }
     if (snapshots.length === 0) {
       this.conversation.push({ role: 'user', content: textContent });
     } else {
@@ -2112,11 +2188,35 @@ export class AgentRuntime {
 
       this.setStatus('thinking');
       const msgs = this.withWorkingState();
+      const tools = toolsForSourcePolicy(this.sourcePolicy, baseTools);
       const reply = await complete(this.modelForCall(settings, msgs), msgs, tools, this.makeSignal(), this.rateLimitNotice);
       if (this.aborted(epoch)) return;
 
       if (!reply.tool_calls || reply.tool_calls.length === 0) {
-        const text = reply.content ?? '(no response)';
+        if (!reply.content?.trim()) throw new LlmError('Model provider returned an empty final response.');
+        let text = reply.content;
+        const requiresRepoCitation =
+          this.sourcePolicy.mode === 'repo_only' &&
+          !this.sourcePolicy.webApproved &&
+          this.repoEvidenceStatus === 'strong';
+        const requiresWebCitation = this.webEvidenceRegistered;
+        if ((requiresRepoCitation || requiresWebCitation) && this.resolveCitations(text).citations.length === 0) {
+          if (this.sourceNudgesDone < 1 && this.stepsUsed < this.stepBudget) {
+            this.sourceNudgesDone++;
+            this.conversation.push({ role: 'assistant', content: text });
+            this.conversation.push({
+              role: 'user',
+              content:
+                'Your draft uses retrieved evidence but has no validated inline citations. Revise it and place the supplied ' +
+                '[[sentence-id]] tokens immediately after the claims they support. Cite only tokens from the current tool results.',
+            });
+            this.notice('Adding validated inline citations to the answer.');
+            continue;
+          }
+          if (requiresRepoCitation) {
+            text = 'I found relevant repository passages but could not produce a citation-grounded answer. Please retry the question.';
+          }
+        }
         // Plan-execution guard (deterministic, runs before the self-check): if the
         // model tries to finish while its plan is untouched (open steps, none done)
         // and budget remains, push it back once to actually work the plan. Targets
@@ -2125,8 +2225,7 @@ export class AgentRuntime {
           this.planUnstarted() &&
           this.planNudgesDone < 1 &&
           this.stepsUsed < this.stepBudget &&
-          text.trim() &&
-          text !== '(no response)'
+          text.trim()
         ) {
           this.planNudgesDone++;
           this.conversation.push({ role: 'assistant', content: text });
@@ -2147,8 +2246,7 @@ export class AgentRuntime {
           (settings.verifyAnswers ?? true) &&
           this.reflectionsDone < 1 &&
           this.stepsUsed < this.stepBudget &&
-          text.trim() &&
-          text !== '(no response)'
+          text.trim()
         ) {
           const verdict = await this.reflect(settings, text);
           if (this.aborted(epoch)) return;
@@ -2303,9 +2401,10 @@ export class AgentRuntime {
    */
   private async executeToolCalls(calls: LlmToolCall[], epoch: number = this.taskEpoch): Promise<void> {
     this.toolCallCount += calls.length;
+    const signal = this.makeSignal();
     const results = new Map<string, string>();
     const run = async (call: LlmToolCall) => {
-      results.set(call.id, this.aborted(epoch) ? 'Task stopped by user.' : await this.executeToolCall(call));
+      results.set(call.id, this.aborted(epoch) ? 'Task stopped by user.' : await this.executeToolCall(call, epoch, signal));
     };
     await Promise.all(calls.filter((c) => READ_ONLY_TOOLS.has(c.function.name)).map(run));
     for (const c of calls.filter((c) => !READ_ONLY_TOOLS.has(c.function.name))) {
@@ -2345,7 +2444,8 @@ export class AgentRuntime {
     const msgs = this.withWorkingState();
     const reply = await complete(this.modelForCall(settings, msgs), msgs, undefined, this.makeSignal(), this.rateLimitNotice);
     if (this.stopRequested) return;
-    const text = reply.content ?? '(no answer)';
+    if (!reply.content?.trim()) throw new LlmError('Model provider returned an empty final response.');
+    const text = reply.content;
     this.conversation.push({ role: 'assistant', content: text });
     const cited = this.resolveCitations(text);
     this.pushChat({
@@ -2443,11 +2543,18 @@ export class AgentRuntime {
     return out;
   }
 
-  /** Rough char count of a message's content (string or multimodal parts). */
+  /**
+   * Rough char count of a message's content (string or multimodal parts).
+   * Image parts are weighted by their actual data-URL length (a captured page
+   * frame is a multi-KB/MB base64 string), not a flat placeholder — a flat
+   * weight would let captured-image messages silently balloon the real
+   * conversation size past `CONVERSATION_CHAR_BUDGET` without the budget ever
+   * noticing, since `compactConversation` only sees this count.
+   */
   private static messageLen(m: LlmMessage): number {
     if (typeof m.content === 'string') return m.content.length;
     if (Array.isArray(m.content)) {
-      return m.content.reduce((n, p) => n + (p.type === 'text' ? p.text.length : 1200), 0);
+      return m.content.reduce((n, p) => n + (p.type === 'text' ? p.text.length : p.image_url.url.length), 0);
     }
     return 0;
   }
@@ -2455,25 +2562,36 @@ export class AgentRuntime {
   // Placeholder left in place of an evicted tool output we don't (or can't)
   // summarize; its prefix is also the marker that a message was already evicted.
   private static readonly COMPACT_PLACEHOLDER = '[compacted — important results are in Findings]';
+  // Placeholder for evicted image (full-page capture) messages: the images
+  // already served their purpose earlier in the turn, so they're dropped
+  // outright rather than summarized.
+  private static readonly COMPACT_IMAGE_PLACEHOLDER =
+    '[compacted — earlier captured page frame(s) removed to save context]';
   // Only outputs bigger than this are worth a summarization call; tinier ones
   // just get the placeholder.
   private static readonly SUMMARIZE_MIN_CHARS = 1500;
 
   /**
    * Keep the conversation under `CONVERSATION_CHAR_BUDGET` by evicting the
-   * oldest, bulkiest tool outputs. With `summarizeObservations` on (default), the
-   * larger evicted outputs are replaced by a cheap LLM digest that preserves
-   * their salient facts/URLs; otherwise (or on any summarizer failure) they get a
-   * short static placeholder. Safe either way because the plan + findings are
+   * oldest, bulkiest tool outputs and image (full-page capture) messages. With
+   * `summarizeObservations` on (default), the larger evicted tool outputs are
+   * replaced by a cheap LLM digest that preserves their salient facts/URLs;
+   * otherwise (or on any summarizer failure) they get a short static
+   * placeholder. Evicted image messages are always just dropped (see
+   * COMPACT_IMAGE_PLACEHOLDER) — a stale screenshot doesn't gain anything from
+   * being summarized. Safe either way because the plan + findings are
    * re-injected every step in the working-state block, and the most recent few
-   * messages are left intact so the model retains immediate context.
+   * messages are left intact so the model retains immediate context (including
+   * the most recent capture, if any).
    */
   private async compactConversation(settings: Settings): Promise<void> {
     let total = this.conversation.reduce((n, m) => n + AgentRuntime.messageLen(m), 0);
     if (total <= CONVERSATION_CHAR_BUDGET) return;
     const protectedTail = 6; // leave the most recent messages intact
-    // Pick the oldest not-yet-evicted tool outputs, in order, until back under budget.
+    // Pick the oldest not-yet-evicted tool outputs and image messages, in
+    // order, until back under budget.
     const victims: number[] = [];
+    const imageVictims: number[] = [];
     for (let i = 1; i < this.conversation.length - protectedTail && total > CONVERSATION_CHAR_BUDGET; i++) {
       const m = this.conversation[i];
       if (
@@ -2484,9 +2602,16 @@ export class AgentRuntime {
       ) {
         victims.push(i);
         total -= m.content.length - AgentRuntime.COMPACT_PLACEHOLDER.length;
+      } else if (m.role === 'user' && Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url')) {
+        imageVictims.push(i);
+        total -= AgentRuntime.messageLen(m) - AgentRuntime.COMPACT_IMAGE_PLACEHOLDER.length;
       }
     }
-    if (victims.length === 0) return;
+    if (victims.length === 0 && imageVictims.length === 0) return;
+
+    for (const i of imageVictims) {
+      this.conversation[i].content = [{ type: 'text', text: AgentRuntime.COMPACT_IMAGE_PLACEHOLDER }];
+    }
 
     // Summarize the worthwhile (large) victims in one batched call; tiny ones and
     // any we couldn't summarize fall back to the static placeholder.
@@ -2661,7 +2786,7 @@ export class AgentRuntime {
    * approval, execution — is appended to the audit log. Tools return strings,
    * never throw, so the loop always gets a result.
    */
-  private async executeToolCall(call: LlmToolCall): Promise<string> {
+  private async executeToolCall(call: LlmToolCall, epoch: number, signal?: AbortSignal): Promise<string> {
     const name = call.function.name;
     let args: Record<string, unknown>;
     try {
@@ -2670,11 +2795,29 @@ export class AgentRuntime {
       return `Error: could not parse arguments for ${name}.`;
     }
 
+    if (!sourceToolAllowed(this.sourcePolicy, name)) {
+      return `Error: ${name} is unavailable because this turn is restricted to the selected repository. ` +
+        'Call request_web_fallback with a reason if external information is necessary.';
+    }
+    if (
+      this.sourcePolicy.mode === 'repo_only' &&
+      (name === 'search_repo' || name === 'search_graph' || name === 'global_search') &&
+      !sourceRepositoryAllowed(this.sourcePolicy, String(args.repo ?? ''))
+    ) {
+      return `Error: repository-only mode permits only: ${this.sourcePolicy.repos.join(', ')}.`;
+    }
+
     const activity = this.startActivity(name, args);
+    const stopped = () => signal?.aborted || this.taskEpoch !== epoch;
+    const stoppedResult = () => {
+      if (activity.status === 'running') this.finishActivity(activity, 'error', 'Task stopped by user.');
+      return 'Task stopped by user.';
+    };
 
     // Resolve capability context for tools sourced from registered capabilities.
     let approvalContext: ApprovalContext | undefined;
     const capabilities = this.scopedCapabilities(await getCapabilities());
+    if (stopped()) return stoppedResult();
     if (name === 'call_mcp_tool' || name === 'list_mcp_tools') {
       const serverName = String(args.server ?? '');
       const capability = capabilities.find((c) =>
@@ -2704,14 +2847,18 @@ export class AgentRuntime {
     // ----- Policy decision (single source of truth for allow/deny/approval).
     // Page content never reaches evaluatePolicy — pages only ever feed name/args.
     const target = await this.resolveTarget(args);
+    if (stopped()) return stoppedResult();
     const inputDigest = await sha256Hex(JSON.stringify(args));
+    if (stopped()) return stoppedResult();
+    const sessionApprovedTools = await getSessionApprovals();
+    if (stopped()) return stoppedResult();
     const decision = evaluatePolicy({
       tool: name,
       actionClass: classifyTool(name, READ_ONLY_TOOLS),
       attended: !this.unattended,
       trustLevel: approvalContext?.trustLevel,
       capabilityKind: approvalContext?.capabilityKind,
-      sessionApprovedTools: await getSessionApprovals(),
+      sessionApprovedTools,
       unattendedBlockedTools: UNATTENDED_BLOCKED_TOOLS,
     });
     void this.audit({
@@ -2755,6 +2902,7 @@ export class AgentRuntime {
       };
       void this.audit({ eventType: 'APPROVAL_REQUESTED', tool: name, target, inputDigest, approvalId, unattended: false });
       const approved = await this.requestApproval(reason, this.describeAction(name, args), boundContext);
+      if (stopped()) return stoppedResult();
       if (!approved) {
         this.finishActivity(activity, 'denied', 'User denied this action');
         void this.audit({ eventType: 'APPROVAL_DENIED', tool: name, target, inputDigest, approvalId, result: 'denied', unattended: false });
@@ -2763,10 +2911,12 @@ export class AgentRuntime {
       void this.audit({ eventType: 'APPROVAL_GRANTED', tool: name, target, inputDigest, approvalId, unattended: false });
     }
 
+    if (stopped()) return stoppedResult();
     this.setStatus('acting', name);
     const startedAt = Date.now();
     try {
-      const result = await this.dispatchTool(name, args);
+      const result = await this.dispatchTool(name, args, signal);
+      if (stopped()) return stoppedResult();
       this.finishActivity(activity, 'ok');
       void this.audit({
         eventType: 'TOOL_EXECUTED', tool: name, target, inputDigest,
@@ -2775,6 +2925,7 @@ export class AgentRuntime {
       });
       return result;
     } catch (err) {
+      if (stopped()) return stoppedResult();
       const message = err instanceof Error ? err.message : String(err);
       this.finishActivity(activity, 'error', message);
       void this.audit({
@@ -2817,7 +2968,7 @@ export class AgentRuntime {
     }
   }
 
-  private async dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
+  private async dispatchTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
     const tabId = Number(args.tabId);
     switch (name) {
       case 'list_tabs':
@@ -2879,8 +3030,15 @@ export class AgentRuntime {
         if (result.tabId > 0) await this.addToConversationGroup(result.tabId);
         return JSON.stringify({ ...result, group: this.groupName });
       }
-      case 'read_tab_group':
-        return browser.readTabGroup(args.name ? String(args.name) : undefined, this.groupId);
+      case 'read_tab_group': {
+        const group = await browser.readTabGroup(args.name ? String(args.name) : undefined, this.groupId);
+        if (group.error) return JSON.stringify({ error: group.error });
+        return JSON.stringify({
+          group: group.group,
+          count: group.count,
+          results: (group.results ?? []).map((content) => this.contentForModel(content, 6000)),
+        });
+      }
       case 'run_subtasks':
         return this.runScopedSubtasks(args);
       case 'add_to_repo':
@@ -2889,26 +3047,95 @@ export class AgentRuntime {
         const settings = await getSettings();
         if (!settings) return 'Error: no model configured.';
         const query = String(args.query);
-        const finalK = Number(args.k) || settings.repoSearchK || 6;
+        const repo = String(args.repo);
+        const requestedK = Number(args.k) || settings.repoSearchK || 6;
+        const finalK = Math.min(20, Math.max(1, Math.floor(requestedK)));
         const candidateK = Math.max(20, finalK * 3);
-        const queries = await this.repoQueryVariants(settings, query);
+        const cacheKey = JSON.stringify([
+          repo,
+          query.trim().toLowerCase(),
+          finalK,
+          embedderId(settings),
+          settings.hybridSearch !== false,
+          settings.graphAssistedSearch !== false,
+        ]);
+        const cached = this.repoSearchCache.get(cacheKey);
+        if (cached) return cached;
+
+        const startedAt = Date.now();
+        let embeddingMs = 0;
+        let retrievalMs = 0;
+        let expansionMs = 0;
+        let rerankMs = 0;
+        let rerankedByModel = false;
+        let queries = [query];
         let queryVec: number[][];
         try {
-          queryVec = await embedChunks(settings, queries, this.makeSignal());
+          const before = Date.now();
+          queryVec = await embedChunks(settings, queries, signal);
+          embeddingMs += Date.now() - before;
         } catch (e) {
+          if (signal?.aborted) throw signal.reason;
           return `Error embedding the query: ${e instanceof Error ? e.message : String(e)}`;
         }
-        const res = await repoSearch(
-          String(args.repo),
-          queryVec[0],
-          candidateK,
-          embedderId(settings),
-          { query, queryVectors: queryVec, queries, hybrid: settings.hybridSearch !== false },
-        );
+        const search = async () => {
+          const before = Date.now();
+          const response = await repoSearch(repo, queryVec[0], candidateK, embedderId(settings), {
+            query,
+            queryVectors: queryVec,
+            queries,
+            hybrid: settings.hybridSearch !== false,
+            graphAssist: settings.graphAssistedSearch !== false,
+            signal,
+          });
+          retrievalMs += Date.now() - before;
+          return response;
+        };
+        let res = await search();
+        if (signal?.aborted) throw signal.reason;
         if (!res.ok) return `Error: ${res.error}`;
-        const result = res.result as { results?: SearchHit[] } | undefined;
-        const hits = Array.isArray(result?.results) ? result.results : [];
-        const reranked = await this.rerankRepoHits(settings, query, hits, finalK);
+        let result = res.result as {
+          results?: SearchHit[];
+          diagnostics?: {
+            graphStatus: string;
+            graphRankingCount: number;
+            graphCandidateCount: number;
+          };
+        } | undefined;
+        let hits = Array.isArray(result?.results) ? result.results : [];
+        const initialConfidence = assessRetrievalConfidence(query, hits, result?.diagnostics?.graphCandidateCount ?? 0);
+        let expanded = false;
+        if (initialConfidence.level !== 'strong') {
+          const beforeExpansion = Date.now();
+          queries = await this.repoQueryVariants(settings, query, signal);
+          expansionMs += Date.now() - beforeExpansion;
+          if (queries.length > 1) {
+            try {
+              const beforeEmbedding = Date.now();
+              const extraVectors = await embedChunks(settings, queries.slice(1), signal);
+              embeddingMs += Date.now() - beforeEmbedding;
+              queryVec = [queryVec[0], ...extraVectors];
+              res = await search();
+              if (!res.ok) return `Error: ${res.error}`;
+              result = res.result as typeof result;
+              hits = Array.isArray(result?.results) ? result.results : [];
+              expanded = true;
+            } catch (error) {
+              if (signal?.aborted) throw signal.reason ?? error;
+              queries = [query];
+            }
+          }
+        }
+        const confidence = assessRetrievalConfidence(query, hits, result?.diagnostics?.graphCandidateCount ?? 0);
+        this.repoEvidenceStatus = confidence.level;
+        let reranked = hits.slice(0, finalK);
+        if (confidence.level !== 'strong' && hits.length > finalK) {
+          const before = Date.now();
+          reranked = await this.rerankRepoHits(settings, query, hits, finalK, signal);
+          rerankMs += Date.now() - before;
+          rerankedByModel = true;
+        }
+        if (signal?.aborted) throw signal.reason;
         // Tag each passage's sentences with their stable ids and register them so
         // the model can cite [[id]] and the app can later validate + resolve it.
         const results = reranked.map((h) => ({
@@ -2918,7 +3145,29 @@ export class AgentRuntime {
           score: h.score,
           text: this.registerCitations(h),
         }));
-        return JSON.stringify({ results, queries, candidateCount: hits.length });
+        const output = JSON.stringify({
+          status: confidence.level,
+          results,
+          queries,
+          candidateCount: hits.length,
+          retrieval: result?.diagnostics,
+          confidence,
+          strategy: {
+            expanded,
+            reranked: rerankedByModel,
+            timingsMs: { total: Date.now() - startedAt, embedding: embeddingMs, retrieval: retrievalMs, expansion: expansionMs, rerank: rerankMs },
+          },
+        });
+        this.repoSearchCache.set(cacheKey, output);
+        return output;
+      }
+      case 'request_web_fallback': {
+        if (this.sourcePolicy.mode !== 'repo_only') return 'External sources are already available for this turn.';
+        this.sourcePolicy.webApproved = true;
+        this.systemBase +=
+          '\n\nThe user approved external web supplementation for this turn. You may now use external-source tools, but clearly separate web findings from repository evidence and retain repository citations.';
+        if (this.conversation.length > 0) this.conversation[0] = { role: 'system', content: this.systemBase };
+        return 'The user approved web supplementation. External source tools are now available; clearly separate repository evidence from web findings.';
       }
       case 'search_graph': {
         const repo = String(args.repo);
@@ -2942,7 +3191,7 @@ export class AgentRuntime {
         const repo = String(args.repo);
         const gRes = await repoGraphGet(repo);
         const graph = gRes.ok ? (gRes.result as DocGraph | null) : null;
-        const communities = graph?.communities ?? [];
+        const communities = graph ? rankCommunities(graph, String(args.query ?? ''), 5) : [];
         if (communities.length === 0) {
           return `No themes have been built for "${repo}" yet. Build or refresh its knowledge graph from the Knowledge page (themes are computed after extraction), or use search_graph / search_repo.`;
         }
@@ -3326,7 +3575,23 @@ export class AgentRuntime {
       case 'query_pointer_target':
         return browser.queryPointerTarget(tabId);
       case 'read_app_content':
-        return browser.readAppContent(tabId);
+      {
+        const raw = await browser.readAppContent(tabId);
+        try {
+          const result = JSON.parse(raw) as { method?: string; text?: string; truncated?: boolean; note?: string };
+          if (!result.text) return raw;
+          const tab = (await browser.listTabs()).find((item) => item.tabId === tabId);
+          const visibleText = result.text.slice(0, SINGLE_TAB_CHARS);
+          return JSON.stringify({
+            ...result,
+            text: tab?.url ? this.registerWebText(tab.title, tab.url, visibleText) : visibleText,
+            truncated: result.truncated || result.text.length > visibleText.length,
+            ...(tab ? { tabId, url: tab.url, title: tab.title } : {}),
+          });
+        } catch {
+          return raw;
+        }
+      }
       case 'capture_full_page': {
         const active = await browser.getActiveTab();
         const result = await captureFullPage(active.tabId, Number(args.maxFrames) || 12);
@@ -3567,36 +3832,43 @@ export class AgentRuntime {
     return null;
   }
 
-  private async repoQueryVariants(settings: Settings, query: string): Promise<string[]> {
+  private async repoQueryVariants(settings: Settings, query: string, signal?: AbortSignal): Promise<string[]> {
     try {
       const reply = await complete(
-        resolveModelForRole(settings, 'utility'),
+        { ...resolveModelForRole(settings, 'utility'), temperature: 0, maxTokens: 160 },
         [
           { role: 'system', content: 'Generate 2 concise retrieval query paraphrases for RAG search. Preserve names, dates, codes, and quoted terms. Return ONLY JSON: {"queries":["..."]}.' },
           { role: 'user', content: query },
         ],
         undefined,
-        this.makeSignal(),
+        signal,
       );
       const obj = extractJsonObject(reply.content ?? '{}') as { queries?: unknown };
       return uniqueQueries(query, obj.queries);
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
       return [query];
     }
   }
 
-  private async rerankRepoHits(settings: Settings, query: string, hits: SearchHit[], k: number): Promise<SearchHit[]> {
+  private async rerankRepoHits(
+    settings: Settings,
+    query: string,
+    hits: SearchHit[],
+    k: number,
+    signal?: AbortSignal,
+  ): Promise<SearchHit[]> {
     if (hits.length <= k) return hits.slice(0, k);
     try {
       const candidates = hits.slice(0, 20).map((h, i) => ({ id: i + 1, name: h.name, url: h.url, text: h.text.slice(0, 1200) }));
       const reply = await complete(
-        resolveModelForRole(settings, 'utility'),
+        { ...resolveModelForRole(settings, 'utility'), temperature: 0, maxTokens: 256 },
         [
           { role: 'system', content: 'Rerank retrieval chunks for direct usefulness in answering the query. Prefer specific, answer-bearing chunks over generic or duplicate chunks. Return ONLY JSON: {"ids":[candidate ids in best order]}.' },
           { role: 'user', content: JSON.stringify({ query, candidates }) },
         ],
         undefined,
-        this.makeSignal(),
+        signal,
       );
       const obj = extractJsonObject(reply.content ?? '{}') as { ids?: unknown };
       const ids = Array.isArray(obj.ids) ? obj.ids.map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= candidates.length) : [];
@@ -3612,7 +3884,8 @@ export class AgentRuntime {
       }
       for (let i = 0; reranked.length < k && i < hits.length; i++) if (!seen.has(i)) reranked.push(hits[i]);
       return reranked;
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
       return hits.slice(0, k);
     }
   }
@@ -3668,13 +3941,17 @@ export class AgentRuntime {
     const citations: Citation[] = [];
     const seen = new Set<string>();
     const cleaned = text.replace(citationTokenRe(), (_whole, rawId: string) => {
-      const rec = this.citationRegistry.get(rawId.trim());
-      if (!rec) return ''; // fabricated / stale id — remove it
-      if (!seen.has(rec.sentenceId)) {
-        seen.add(rec.sentenceId);
-        citations.push(rec);
+      const validIds: string[] = [];
+      for (const id of citationIdsInReference(rawId)) {
+        const rec = this.citationRegistry.get(id);
+        if (!rec) continue; // fabricated / stale id — remove it
+        validIds.push(rec.sentenceId);
+        if (!seen.has(rec.sentenceId)) {
+          seen.add(rec.sentenceId);
+          citations.push(rec);
+        }
       }
-      return `[[${rec.sentenceId}]]`;
+      return validIds.map((id) => `[[${id}]]`).join(' ');
     });
     return { text: cleaned, citations };
   }
@@ -3955,7 +4232,7 @@ export class AgentRuntime {
     const parts = snapshot.tabs.map((t, i) => {
       const body =
         t.extractionStatus === 'ok' || t.extractionStatus === 'partial'
-          ? t.text.slice(0, perTab)
+          ? this.registerWebText(t.title, t.url, t.text.slice(0, perTab))
           : `(content unavailable: ${t.extractionStatus})`;
       return `[Tab ${i + 1}] tabId=${t.tabId} "${t.title}" ${t.url}\n${body}`;
     });
@@ -3967,15 +4244,27 @@ export class AgentRuntime {
   }
 
   private contentForModel(content: PageContent, maxChars: number): Record<string, unknown> {
+    const visibleText = content.text.slice(0, maxChars);
     return {
       tabId: content.tabId,
       url: content.url,
       title: content.title,
       extractionStatus: content.extractionStatus,
       headings: content.headings.slice(0, 20),
-      text: content.text.slice(0, maxChars),
+      text: this.registerWebText(content.title, content.url, visibleText),
       capturedAt: content.capturedAt,
     };
+  }
+
+  /** Register the exact model-visible webpage snapshot and return tagged text. */
+  private registerWebText(title: string, url: string, text: string): string {
+    if (!/^https?:\/\//i.test(url) || !text.trim()) return text;
+    const source = citableWebSource({ title, url, text });
+    for (const citation of source.citations) {
+      if (!this.citationRegistry.has(citation.sentenceId)) this.citationRegistry.set(citation.sentenceId, citation);
+    }
+    if (source.citations.length > 0) this.webEvidenceRegistered = true;
+    return source.taggedText;
   }
 
   private serializeContent(content: PageContent, maxChars: number): string {
@@ -4012,6 +4301,8 @@ export class AgentRuntime {
         return `Call MCP method "${args.name}" on server "${args.server}" with ${JSON.stringify(args.arguments ?? {}).slice(0, 200)}`;
       case 'call_webmcp_tool':
         return `Call the page's in-page tool "${args.name}" with ${JSON.stringify(args.arguments ?? {}).slice(0, 200)}`;
+      case 'request_web_fallback':
+        return `Allow external web sources for this repository-grounded request: ${String(args.reason ?? '').slice(0, 240)}`;
       case 'draft_email':
         return `Create an Outlook draft to ${stringArray(args.to).join(', ')} with subject "${String(args.subject ?? '').slice(0, 120)}". This will not send the email.`;
       case 'schedule_task':

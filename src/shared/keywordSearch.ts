@@ -99,12 +99,16 @@ export function bm25RankIndexed(params: Bm25IndexedParams): KeywordHit[] {
 
   const hits: KeywordHit[] = [];
   for (let i = 0; i < N; i++) {
-    const tf = new Map(index.termFreqs[i] ?? []);
+    const terms = index.termFreqs[i];
+    if (!terms || terms.length === 0) continue;
     let score = 0;
     const norm = k1 * (1 - b + b * ((index.docLen[i] ?? 0) / (index.avgdl || 1)));
-    for (const [term, idf] of qIdf) {
-      const f = tf.get(term);
-      if (!f) continue;
+    // Single pass over this chunk's terms, no per-chunk Map allocation: qIdf
+    // (built once above, sized to the query's term count) is the O(1) lookup.
+    for (let j = 0; j < terms.length; j++) {
+      const [term, f] = terms[j];
+      const idf = qIdf.get(term);
+      if (idf === undefined || !f) continue;
       score += idf * ((f * (k1 + 1)) / (f + norm));
     }
     if (score > 0) hits.push({ i, score });

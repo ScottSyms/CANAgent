@@ -89,6 +89,15 @@ describe('documentKindForUrl', () => {
     expect(documentKindForUrl('https://x.sharepoint.com/Report.pptx?web=1&csf=1')).toBe('office');
   });
 
+  it('classifies the wider format set anydoc converts (OpenDocument, RTF, EPUB, PowerPoint slideshow)', () => {
+    expect(documentKindForUrl('https://x.sharepoint.com/Notes.odt')).toBe('office');
+    expect(documentKindForUrl('https://x.sharepoint.com/Sheet.ods')).toBe('office');
+    expect(documentKindForUrl('https://x.sharepoint.com/Slides.odp')).toBe('office');
+    expect(documentKindForUrl('https://x.sharepoint.com/Note.rtf')).toBe('office');
+    expect(documentKindForUrl('https://x.sharepoint.com/Book.epub')).toBe('office');
+    expect(documentKindForUrl('https://x.sharepoint.com/Deck.ppsx')).toBe('office');
+  });
+
   it('classifies PDFs', () => {
     expect(documentKindForUrl('https://example.com/docs/manual.pdf')).toBe('pdf');
     expect(documentKindForUrl('https://example.com/docs/manual.pdf?download=1#page=2')).toBe('pdf');

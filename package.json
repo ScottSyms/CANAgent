@@ -1,14 +1,19 @@
 {
   "name": "browser-agent-extension",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build && vite build --config vite.content.config.ts && vite build --config vite.webmcp.config.ts && vite build --config vite.pointer.config.ts && vite build --config vite.learn.config.ts",
+    "build:wasm": "wasm-pack build wasm/vector-simd --target web --release --out-dir ../../src/offscreen/vectorSimdPkg --out-name vector_simd",
+    "build": "npm run build:wasm && vite build && vite build --config vite.content.config.ts && vite build --config vite.webmcp.config.ts && vite build --config vite.pointer.config.ts && vite build --config vite.learn.config.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "benchmark:retrieval": "node scripts/retrieval-benchmark.ts",
+    "benchmark:latency": "node scripts/latency-benchmark.ts",
+    "benchmark:needle": "node scripts/needle-benchmark.ts",
+    "benchmark:graph-build": "node scripts/graph-build-benchmark.ts",
     "test:e2e": "npm run build && playwright test",
     "test:e2e:headed": "npm run build && playwright test --headed",
     "test:e2e:debug": "npm run build && PWDEBUG=1 playwright test",
@@ -23,12 +28,13 @@
     "demo:setup": "uv venv scripts/demo/.venv --python 3.12 && uv pip install --python scripts/demo/.venv/bin/python mlx-audio \"misaki[en]\" espeakng-loader phonemizer-fork https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
   },
   "dependencies": {
+    "@firecrawl/anydoc-wasm": "^0.1.8",
     "@huggingface/transformers": "^3.8.1",
+    "@litertjs/core": "^2.5.3",
     "docx": "^9.7.1",
     "dompurify": "^3.4.9",
     "fflate": "^0.8.3",
     "marked": "^18.0.5",
-    "pdfjs-dist": "^6.0.227",
     "pptxgenjs": "^3.12.0",
     "preact": "^10.24.3"
   },
@@ -43,6 +49,7 @@
     "office-addin-dev-certs": "^2.0.9",
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.8",
+    "wasm-pack": "^0.13.1"
   }
 }

@@ -30,6 +30,7 @@ const EN: Dict = {
   'common.save': 'Save',
   'common.delete': 'Delete',
   'common.dismiss': 'Dismiss',
+  'common.close': 'Close',
   // projects
   'projects.switcher': 'Active project',
   'projects.none': 'No project',
@@ -69,6 +70,7 @@ const EN: Dict = {
   'chat.stop': 'Stop',
   'chat.copy': '⧉ Copy',
   'chat.copied': '✓ Copied',
+  'chat.loadEarlier': 'Load earlier messages ({n} hidden)',
   // approval card
   'approval.title': 'Approve action?',
   'approval.tech': 'Technical detail',
@@ -129,6 +131,13 @@ const EN: Dict = {
   'repos.title': 'Knowledge bases',
   'notebooks.tabNotebooks': 'Notebooks',
   'notebooks.tabIndexing': 'Indexing',
+  'notebooks.saveArchive': 'Save Archive (.kb.json)',
+  'notebooks.loadArchive': 'Load Archive',
+  'notebooks.archiveHint': 'Import a saved .kb.json notebook archive',
+  'notebooks.archiveSaved': 'Exported notebook archive for “{name}”.',
+  'notebooks.archiveLoaded': 'Successfully reloaded notebook “{name}”.',
+  'notebooks.archiveExportError': 'Could not export archive: {msg}',
+  'notebooks.archiveError': 'Could not read archive file: {msg}',
   'repos.note':
     'On-device document stores the agent can search. It fills them when you add pages, and answers from them on demand. Stored only on this device.',
   'repos.loading': 'Loading…',
@@ -301,6 +310,8 @@ const EN: Dict = {
   'modelProfiles.note': 'Route background work to a different (often cheaper or local) model than the main chat loop.',
   'modelProfiles.utilityRole': 'Utility',
   'modelProfiles.utilityHint': 'Titles/summaries, self-check, RAG paraphrase/rerank, skill distillation',
+  'modelProfiles.knowledgeGraphRole': 'Knowledge Graph',
+  'modelProfiles.knowledgeGraphHint': 'Entity/relationship extraction and graph community summaries',
   'modelProfiles.reflectionRole': 'Reflection',
   'modelProfiles.reflectionHint': 'Lesson-learning, memory extraction and merge decisions',
   'modelProfiles.planRole': 'Plan',
@@ -319,6 +330,19 @@ const EN: Dict = {
   'modelProfiles.protocolGemini': 'Gemini native',
   'modelProfiles.temperature': 'Temperature (optional)',
   'modelProfiles.maxTokens': 'Max tokens (optional)',
+  'modelProfiles.graphWindowChars': 'Graph extraction window size, chars (optional)',
+  'modelProfiles.graphWindowCharsHint':
+    'Only used for the Knowledge Graph role. Shrink this for a small or low-context local model so one extraction call’s input plus its output together fit inside the model server’s context window — raising Max tokens alone won’t help if the server’s total context, not the output length, is what’s cutting responses short. For a small local model, try 2000–4000. Leave blank to use the default (6000).',
+  'modelProfiles.graphExtractionStrategy': 'Graph extraction strategy',
+  'modelProfiles.graphStrategyWindow': 'Standard windows (default)',
+  'modelProfiles.graphStrategySentence': 'Target-sentence with context (for small local models)',
+  'modelProfiles.graphExtractionStrategyHint':
+    'Only used for the Knowledge Graph role. "Target-sentence" extracts one sentence at a time, showing the model a few neighboring sentences only to resolve pronouns/references — never as extraction targets. Bounds each call to the smallest possible reasoning task, at the cost of one call per sentence instead of one call per window. Best for very small models (under ~1B parameters) that struggle with multi-sentence extraction.',
+  'modelProfiles.graphContextBefore': 'Context sentences before (optional)',
+  'modelProfiles.graphContextAfter': 'Context sentences after (optional)',
+  'modelProfiles.graphGleaningEnabled': 'Gleaning follow-up (standard windows only)',
+  'modelProfiles.graphGleaningEnabledHint':
+    'After each window’s first extraction, send one follow-up call asking the model what it missed. Recovers entities/relations a small model skipped without needing a bigger window, at the cost of roughly doubling extraction calls. On by default.',
   'modelProfiles.privacyTier': 'Privacy tier',
   'modelProfiles.cloud': 'Cloud (hosted service)',
   'modelProfiles.local': 'Local (on-device / private network)',
@@ -329,6 +353,7 @@ const EN: Dict = {
   'modelProfiles.tagLocalNote': 'Tag a profile Local only if it is actually private.',
   'modelProfiles.roleAssignment': 'Role assignment',
   'modelProfiles.sameAsMain': 'Same as main model',
+  'modelProfiles.sameAsUtility': 'Same as Utility, then main',
   'modelProfiles.restrictLocal': 'Restrict background tasks to local-tagged profiles',
   'modelProfiles.restrictLocalNote': 'Any role routed to a profile not tagged Local falls back to the main model.',
   'modelProfiles.roleCapabilityMissing': 'This profile does not declare {capability} support.',
@@ -382,13 +407,16 @@ const EN: Dict = {
   'settings.temperature': 'Temperature (optional)',
   'settings.maxTokens': 'Max tokens (optional)',
   'settings.embedder': 'Embeddings',
-  'settings.embedder.local': 'On-device (transformers.js)',
+  'settings.embedder.local': 'On-device (LiteRT.js)',
   'settings.embedder.external': 'External /embeddings endpoint',
   'settings.embedder.note':
-    'On-device keeps RAG fully local (model downloads once, then runs on the machine). External sends chunk text to your /embeddings endpoint. Switching embedders requires re-indexing existing knowledge bases.',
+    'On-device keeps RAG fully local (WebGPU-accelerated, falls back to WASM; bundled with the extension, so nothing downloads). External sends chunk text to your /embeddings endpoint. Switching embedders requires re-indexing existing knowledge bases.',
   'settings.hybridSearch': 'Hybrid search (semantic + keyword)',
   'settings.hybridSearchNote':
     'Blend semantic (meaning) and keyword (BM25) ranking so exact tokens — IDs, codes, names — surface alongside related passages. Off = pure semantic. No re-indexing needed either way.',
+  'settings.graphAssistedSearch': 'Graph-assisted retrieval',
+  'settings.graphAssistedSearchNote':
+    'Use a fresh notebook knowledge graph to promote grounded entity, relationship, and cross-document evidence during hybrid search. Enabled by default; falls back automatically when no graph is available.',
   'settings.embeddingModel':
     'Embedding model (optional) — for local repositories; defaults to the model above if blank',
   'settings.repoSearchK': 'Passages per repository search',
@@ -461,6 +489,7 @@ const FR: Dict = {
   'common.save': 'Enregistrer',
   'common.delete': 'Supprimer',
   'common.dismiss': 'Ignorer',
+  'common.close': 'Fermer',
   // projects
   'projects.switcher': 'Projet actif',
   'projects.none': 'Aucun projet',
@@ -500,6 +529,7 @@ const FR: Dict = {
   'chat.stop': 'Arrêter',
   'chat.copy': '⧉ Copier',
   'chat.copied': '✓ Copié',
+  'chat.loadEarlier': 'Charger les messages précédents ({n} masqué(s))',
   // carte d’approbation
   'approval.title': 'Approuver l’action?',
   'approval.tech': 'Détail technique',
@@ -561,6 +591,13 @@ const FR: Dict = {
   'repos.title': 'Bases de connaissances',
   'notebooks.tabNotebooks': 'Carnets',
   'notebooks.tabIndexing': 'Indexation',
+  'notebooks.saveArchive': 'Enregistrer l’archive (.kb.json)',
+  'notebooks.loadArchive': 'Charger une archive',
+  'notebooks.archiveHint': 'Importer un fichier d’archive .kb.json',
+  'notebooks.archiveSaved': 'Archive de carnet exportée pour « {name} ».',
+  'notebooks.archiveLoaded': 'Carnet « {name} » rechargé avec succès.',
+  'notebooks.archiveExportError': 'Impossible d’exporter l’archive : {msg}',
+  'notebooks.archiveError': 'Impossible de lire le fichier d’archive : {msg}',
   'repos.note':
     'Stockages de documents sur l’appareil que l’agent peut interroger. Elles se remplissent lorsque vous ajoutez des pages, et l’agent y répond à la demande. Stockées uniquement sur cet appareil.',
   'repos.loading': 'Chargement…',
@@ -733,6 +770,8 @@ const FR: Dict = {
   'modelProfiles.note': 'Acheminez le travail de fond vers un modèle différent (souvent moins coûteux ou local) que la conversation principale.',
   'modelProfiles.utilityRole': 'Utilitaire',
   'modelProfiles.utilityHint': 'Titres/résumés, auto-vérification, paraphrase/rerank RAG, distillation de compétence',
+  'modelProfiles.knowledgeGraphRole': 'Graphe de connaissances',
+  'modelProfiles.knowledgeGraphHint': 'Extraction des entités/relations et résumés des communautés du graphe',
   'modelProfiles.reflectionRole': 'Réflexion',
   'modelProfiles.reflectionHint': 'Apprentissage de leçons, extraction de mémoire et décisions de fusion',
   'modelProfiles.planRole': 'Plan',
@@ -751,6 +790,19 @@ const FR: Dict = {
   'modelProfiles.protocolGemini': 'Gemini natif',
   'modelProfiles.temperature': 'Température (facultatif)',
   'modelProfiles.maxTokens': 'Jetons maximum (facultatif)',
+  'modelProfiles.graphWindowChars': 'Taille de la fenêtre d’extraction du graphe, caractères (facultatif)',
+  'modelProfiles.graphWindowCharsHint':
+    'Utilisé uniquement pour le rôle Graphe de connaissances. Réduisez cette valeur pour un modèle local petit ou à faible contexte, afin que l’entrée d’un appel d’extraction et sa sortie tiennent ensemble dans la fenêtre de contexte du serveur du modèle — augmenter uniquement les jetons maximum n’aidera pas si c’est le contexte total du serveur, et non la longueur de sortie, qui tronque les réponses. Pour un petit modèle local, essayez 2000–4000. Laissez vide pour utiliser la valeur par défaut (6000).',
+  'modelProfiles.graphExtractionStrategy': 'Stratégie d’extraction du graphe',
+  'modelProfiles.graphStrategyWindow': 'Fenêtres standard (par défaut)',
+  'modelProfiles.graphStrategySentence': 'Phrase cible avec contexte (pour petits modèles locaux)',
+  'modelProfiles.graphExtractionStrategyHint':
+    'Utilisé uniquement pour le rôle Graphe de connaissances. « Phrase cible » extrait une phrase à la fois, en montrant au modèle quelques phrases voisines uniquement pour résoudre les pronoms/références — jamais comme cibles d’extraction. Limite chaque appel à la plus petite tâche de raisonnement possible, au prix d’un appel par phrase plutôt que par fenêtre. Idéal pour les très petits modèles (moins d’environ 1 milliard de paramètres) qui peinent avec l’extraction multi-phrases.',
+  'modelProfiles.graphContextBefore': 'Phrases de contexte avant (facultatif)',
+  'modelProfiles.graphContextAfter': 'Phrases de contexte après (facultatif)',
+  'modelProfiles.graphGleaningEnabled': 'Relance de collecte (fenêtres standard uniquement)',
+  'modelProfiles.graphGleaningEnabledHint':
+    'Après la première extraction de chaque fenêtre, envoie un appel de relance demandant au modèle ce qu’il a manqué. Récupère les entités/relations qu’un petit modèle a omises sans avoir besoin d’une fenêtre plus grande, au prix d’environ le double d’appels d’extraction. Activé par défaut.',
   'modelProfiles.privacyTier': 'Niveau de confidentialité',
   'modelProfiles.cloud': 'Nuage (service hébergé)',
   'modelProfiles.local': 'Local (sur l’appareil / réseau privé)',
@@ -761,6 +813,7 @@ const FR: Dict = {
   'modelProfiles.tagLocalNote': 'N’étiquetez Local que si le profil est réellement privé.',
   'modelProfiles.roleAssignment': 'Assignation des rôles',
   'modelProfiles.sameAsMain': 'Identique au modèle principal',
+  'modelProfiles.sameAsUtility': 'Identique à Utilitaire, puis au modèle principal',
   'modelProfiles.restrictLocal': 'Restreindre les tâches d’arrière-plan aux profils marqués Local',
   'modelProfiles.restrictLocalNote': 'Tout rôle associé à un profil non Local revient au modèle principal.',
   'modelProfiles.roleCapabilityMissing': 'Ce profil ne déclare pas la prise en charge de {capability}.',
@@ -814,13 +867,16 @@ const FR: Dict = {
   'settings.temperature': 'Température (facultatif)',
   'settings.maxTokens': 'Jetons maximum (facultatif)',
   'settings.embedder': 'Vectorisation',
-  'settings.embedder.local': 'Sur l’appareil (transformers.js)',
+  'settings.embedder.local': 'Sur l’appareil (LiteRT.js)',
   'settings.embedder.external': 'Point de terminaison /embeddings externe',
   'settings.embedder.note':
-    'Sur l’appareil garde le RAG entièrement local (le modèle se télécharge une fois, puis s’exécute localement). Externe envoie le texte des segments à votre point de terminaison /embeddings. Changer de moteur exige de réindexer les bases existantes.',
+    'Sur l’appareil garde le RAG entièrement local (accéléré par WebGPU, repli sur WASM; intégré à l’extension, donc rien à télécharger). Externe envoie le texte des segments à votre point de terminaison /embeddings. Changer de moteur exige de réindexer les bases existantes.',
   'settings.hybridSearch': 'Recherche hybride (sémantique + mots-clés)',
   'settings.hybridSearchNote':
     'Combine le classement sémantique (sens) et par mots-clés (BM25) pour que les jetons exacts — identifiants, codes, noms — ressortent à côté des passages liés. Désactivé = purement sémantique. Aucune réindexation requise.',
+  'settings.graphAssistedSearch': 'Recherche assistée par graphe',
+  'settings.graphAssistedSearchNote':
+    'Utilise un graphe de connaissances à jour pour promouvoir les entités, relations et preuves interdocuments pendant la recherche hybride. Activée par défaut; revient automatiquement à la recherche normale sans graphe.',
   'settings.embeddingModel':
     'Modèle d’intégration (facultatif) — pour les dépôts locaux; utilise le modèle ci-dessus si vide',
   'settings.repoSearchK': 'Passages par recherche de dépôt',
@@ -944,4 +1000,3 @@ export function LanguageProvider({ children }: { children: ComponentChildren }) 
 export function useT(): Translator {
   return useContext(LangContext).t;
 }
-

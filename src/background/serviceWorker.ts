@@ -35,11 +35,21 @@ import {
   repoDeleteDoc,
   repoDocs,
   repoExport,
+  repoExportOne,
   repoImport,
+  repoImportOne,
   repoList,
 } from './offscreenClient';
 import { generateNotebookOverview, isOverviewStale } from './notebookOverview';
-import { buildRepoGraph } from './graphExtract';
+import {
+  buildRepoGraph,
+  buildRepoGraphInstant,
+  buildRepoGraphQuick,
+  getDocWindows,
+  type GraphBuildBackboneProgress,
+  type GraphBuildInstantProgress,
+  type GraphBuildProgress,
+} from './graphExtract';
 import { generateStudioOutput } from './studioOutputs';
 import { studioGet } from './offscreenClient';
 import { resolveSentenceCitations } from './sentenceResolve';
@@ -48,8 +58,13 @@ import type { DocGraph } from '../shared/docGraph';
 
 // Repos with a graph build currently in flight (in-memory; lost on SW eviction,
 // after which a build resumes from the checkpointed graph on the next request).
-const graphBuilding = new Set<string>();
-import { ingestFile } from './repoIngest';
+const graphBuilding = new Map<string, AbortController>();
+// Latest in-flight progress per repo (in-memory, same lifetime as
+// graphBuilding) — the build functions' onProgress callbacks write here so
+// notebook_graph_get can report live stage/doc progress to the UI's poll,
+// instead of only what's been checkpointed to graph.json so far.
+const graphBuildProgress = new Map<string, GraphBuildBackboneProgress | GraphBuildProgress | GraphBuildInstantProgress>();
+import { ingestFilesBatch } from './repoIngest';
 import { indexMailbox, type MailSyncProgress } from './mailIngest';
 import {
   indexSharePointLibrary,
@@ -90,6 +105,7 @@ import { probeEnvironment } from './envProbe';
 import { applyDecay, MEMORY_NODE_CAP, pruneGraph } from '../shared/memoryGraph';
 import { memoryIndexRemove, memoryIndexUpsert } from './memoryIndex';
 import { getVaultState, vaultDecrypt, vaultEncrypt } from './vault';
+import { withSwKeepalive } from './swKeepalive';
 
 // ----- Mailbox auto-refresh (chrome.alarms, opt-in) -----
 //
@@ -390,6 +406,11 @@ chrome.runtime.onConnect.addListener((port) => {
 // management. Each handler returns `true` to keep the message channel open for
 // the async `sendResponse` (a Chrome messaging requirement).
 chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResponse) => {
+  if (request.type === 'stop_task') {
+    runtime.stop();
+    sendResponse({ ok: true });
+    return false;
+  }
   if (request.type === 'test_connection') {
     testConnection(request.settings).then((result: TestConnectionResponse) => sendResponse(result));
     return true; // async response
@@ -446,11 +467,11 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     return true;
   }
   if (request.type === 'notebook_overview_generate') {
-    (async () => {
+    withSwKeepalive(async () => {
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
       return generateNotebookOverview(settings, request.repo);
-    })()
+    })
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
@@ -459,30 +480,85 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     (async () => {
       const [graphRes, docsRes] = await Promise.all([graphGet(request.repo), repoDocs(request.repo)]);
       const graph = (graphRes.ok ? graphRes.result : null) as DocGraph | null;
-      const docs = (docsRes.ok ? docsRes.result : []) as unknown[];
-      return { ok: true, graph, docCount: docs.length, building: graphBuilding.has(request.repo) };
+      const docs = (docsRes.ok ? docsRes.result : []) as Array<{ id: string; name: string }>;
+      return {
+        ok: true,
+        graph,
+        docCount: docs.length,
+        docs: docs.map((d) => ({ id: d.id, name: d.name })),
+        building: graphBuilding.has(request.repo),
+        progress: graphBuildProgress.get(request.repo),
+      };
     })()
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }
-  if (request.type === 'notebook_graph_build') {
-    // Kept-open channel keeps the SW alive during the build; the UI polls
-    // notebook_graph_get meanwhile for per-doc progress (checkpointed each doc).
-    (async () => {
-      const settings = await getSettings();
-      if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
-      if (graphBuilding.has(request.repo)) return { ok: false, error: 'A graph build is already running for this notebook.' };
-      graphBuilding.add(request.repo);
-      try {
-        return await buildRepoGraph(settings, request.repo, { rebuild: request.rebuild });
-      } finally {
-        graphBuilding.delete(request.repo);
-      }
-    })()
+  if (request.type === 'notebook_doc_windows') {
+    getSettings()
+      .then((settings) => getDocWindows(request.repo, request.docId, settings ?? undefined))
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
+  }
+  if (request.type === 'notebook_graph_build') {
+    // The UI polls notebook_graph_get meanwhile for per-doc progress
+    // (checkpointed each doc). withSwKeepalive keeps the SW's idle timer from
+    // firing mid-build — see swKeepalive.ts for why that's needed even with a
+    // kept-open response channel.
+    withSwKeepalive(async () => {
+      if (graphBuilding.has(request.repo)) return { ok: false, error: 'A graph build is already running for this notebook.' };
+      const onProgress = (p: GraphBuildBackboneProgress | GraphBuildProgress | GraphBuildInstantProgress) =>
+        graphBuildProgress.set(request.repo, p);
+      // The Instant tier clusters already-computed embeddings — it makes zero
+      // model calls of any kind, so unlike every other mode it doesn't need a
+      // main model configured at all. Branch before the settings gate below.
+      if (request.mode === 'instant') {
+        const controller = new AbortController();
+        graphBuilding.set(request.repo, controller);
+        try {
+          return await buildRepoGraphInstant(request.repo, { signal: controller.signal, onProgress });
+        } finally {
+          graphBuilding.delete(request.repo);
+          graphBuildProgress.delete(request.repo);
+        }
+      }
+      const settings = await getSettings();
+      if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
+      const controller = new AbortController();
+      graphBuilding.set(request.repo, controller);
+      try {
+        // Default ("Quick"): the on-device NER backbone plus a bounded,
+        // corpus-size-independent layer of LLM enrichment (community themes +
+        // typed-relation upgrades) — see buildRepoGraphQuick's doc comment.
+        // "Full" is the only mode still routed to the old window/sentence
+        // LLM extraction, whose call count scales with document count.
+        if (request.mode !== 'full') {
+          return await buildRepoGraphQuick(settings, request.repo, {
+            rebuild: request.rebuild,
+            signal: controller.signal,
+            onProgress,
+          });
+        }
+        return await buildRepoGraph(settings, request.repo, {
+          rebuild: request.rebuild,
+          mode: 'full',
+          signal: controller.signal,
+          onProgress,
+        });
+      } finally {
+        graphBuilding.delete(request.repo);
+        graphBuildProgress.delete(request.repo);
+      }
+    })
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (request.type === 'notebook_graph_cancel') {
+    graphBuilding.get(request.repo)?.abort(new DOMException('Graph build stopped by user.', 'AbortError'));
+    sendResponse({ ok: true });
+    return false;
   }
   if (request.type === 'notebook_graph_evidence') {
     resolveSentenceCitations(request.repo, request.sentenceIds)
@@ -497,11 +573,11 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     return true;
   }
   if (request.type === 'notebook_studio_generate') {
-    (async () => {
+    withSwKeepalive(async () => {
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
       return generateStudioOutput(settings, request.repo, request.kind);
-    })()
+    })
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
@@ -518,17 +594,24 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     repoImport(request.repos).then((r) => sendResponse(r));
     return true;
   }
+  if (request.type === 'repo_export_one') {
+    repoExportOne(request.repo)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (request.type === 'repo_import_one') {
+    repoImportOne(request.repoData, request.targetName).then((r) => sendResponse(r));
+    return true;
+  }
   if (request.type === 'add_files_to_repo') {
     (async () => {
       const settings = await getSettings();
       if (!settings) {
         return { ok: false, results: [], error: 'No model configured. Open Settings first.' };
       }
-      const results = [];
-      for (const file of request.files) {
-        const res = await ingestFile(settings, request.repo, file, request.kind ?? 'page');
-        results.push({ name: file.name, ok: res.ok, chunks: res.chunks, error: res.error });
-      }
+      const outcomes = await ingestFilesBatch(settings, request.repo, request.files, request.kind ?? 'page');
+      const results = request.files.map((file, i) => ({ name: file.name, ok: outcomes[i].ok, chunks: outcomes[i].chunks, error: outcomes[i].error }));
       return { ok: results.some((r) => r.ok), results };
     })().then(sendResponse);
     return true;
@@ -551,7 +634,7 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     return true;
   }
   if (request.type === 'index_sharepoint_library') {
-    (async () => {
+    withSwKeepalive(async () => {
       if (sharePointIndexBusy) return { ok: false, error: 'A SharePoint refresh is already running — try again shortly.' };
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
@@ -567,11 +650,11 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
       } finally {
         sharePointIndexBusy = false;
       }
-    })().then(sendResponse);
+    }).then(sendResponse);
     return true;
   }
   if (request.type === 'index_mailbox') {
-    (async () => {
+    withSwKeepalive(async () => {
       if (mailIndexBusy) return { ok: false, error: 'A mailbox refresh is already running — try again shortly.' };
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
@@ -598,7 +681,7 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
       } finally {
         mailIndexBusy = false;
       }
-    })().then(sendResponse);
+    }).then(sendResponse);
     return true;
   }
   if (request.type === 'memory_graph_get') {

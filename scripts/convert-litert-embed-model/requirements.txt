@@ -1,0 +1,2 @@
+litert-torch
+sentence-transformers

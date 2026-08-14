@@ -3,8 +3,13 @@ import {
   repoAdd,
   repoDeleteDoc,
   repoDocChunks,
+  repoDocVectors,
+  repoExportOne,
   repoGraphGet,
+  repoGraphGetRaw,
+  repoGraphSnapshot,
   repoGraphSet,
+  repoImportOne,
   repoList,
   repoNotebookGet,
   repoNotebookSample,
@@ -15,6 +20,7 @@ import {
 } from './repoStore';
 import type { NotebookOverview } from '../shared/types';
 import { emptyDocGraph, mergeExtraction } from '../shared/docGraph';
+import { dequantizeVector, normalizeVector } from '../shared/vectorSearch';
 
 // ---- minimal in-memory OPFS fake (only the surface repoStore uses) ----
 
@@ -201,7 +207,7 @@ describe('document graph', () => {
     await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
     const g = emptyDocGraph();
     mergeExtraction(g, { entities: [{ label: 'SSC', type: 'org', summary: 's', evidence: ['x'] }], relations: [] }, 'doc-1');
-    await repoGraphSet('r', g);
+    await repoGraphSet('r', g, 1);
     const back = await repoGraphGet('r');
     expect(back?.nodes.map((n) => n.label)).toEqual(['SSC']);
     expect(back?.processedDocIds).toEqual(['doc-1']);
@@ -209,6 +215,169 @@ describe('document graph', () => {
 
   it('returns null when no graph exists', async () => {
     await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    expect(await repoGraphGet('r')).toBeNull();
+  });
+
+  it('repoGraphGetRaw returns a stale graph that repoGraphGet correctly refuses (for resuming a build)', async () => {
+    // Regression test: buildRepoGraph used to resume via repoGraphGet (the
+    // staleness-gated getter meant for live search/UI use) -- so the moment a
+    // graph fell behind the repo's current corpusRevision (true as soon as
+    // any document is added/removed since it was built), buildRepoGraph saw
+    // null and silently discarded all prior nodes/edges/docCoverage on the
+    // very next rebuild, even though the data was sitting right there.
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    const g = emptyDocGraph();
+    mergeExtraction(g, { entities: [{ label: 'SSC', type: 'org', summary: 's', evidence: ['x'] }], relations: [] }, 'doc-1');
+    await repoGraphSet('r', g, 1);
+
+    // Adding another document bumps corpusRevision to 2 without deleting the
+    // graph (see the repoAdd fix above) -- the graph, still stamped at
+    // revision 1, is now genuinely stale relative to the repo's meta.
+    await repoAdd('r', { name: 'b', url: 'file:///b' }, ['world'], [vec(8, 2)]);
+
+    expect(await repoGraphGet('r')).toBeNull(); // correct: refuse stale data for live use
+    const raw = await repoGraphGetRaw('r');
+    expect(raw?.nodes.map((n) => n.label)).toEqual(['SSC']); // correct: still resumable
+    expect(raw?.corpusRevision).toBe(1);
+  });
+
+  it('fuses fresh graph evidence into ordinary hybrid repository search', async () => {
+    const { docId } = await repoAdd(
+      'r',
+      { name: 'a', url: 'file:///a' },
+      ['Semantic winner with generic content.', 'Graph-grounded passage with different wording.'],
+      [[1, 0], [0, 1]],
+      { embedModel: 'local:minilm' },
+    );
+    const baseline = await repoSearch('r', [1, 0], 1, 'local:minilm', { query: 'Project Atlas', hybrid: true });
+    expect(baseline.results[0].text).toContain('Semantic winner');
+    expect(baseline.diagnostics).toEqual({
+      graphStatus: 'no_graph',
+      graphRankingCount: 0,
+      graphCandidateCount: 0,
+    });
+
+    const doc = await repoDocChunks('r', docId);
+    const graph = emptyDocGraph();
+    mergeExtraction(graph, {
+      entities: [{
+        label: 'Project Atlas',
+        type: 'project',
+        summary: 'A strategic initiative.',
+        evidence: [doc[1].sentences[0].id],
+      }],
+      relations: [],
+    }, docId);
+    await repoGraphSet('r', graph, 1);
+
+    const assisted = await repoSearch('r', [1, 0], 1, 'local:minilm', { query: 'Project Atlas', hybrid: true });
+    expect(assisted.results[0].text).toContain('Graph-grounded passage');
+    expect(assisted.diagnostics).toEqual({
+      graphStatus: 'used',
+      graphRankingCount: 1,
+      graphCandidateCount: 1,
+    });
+
+    const disabled = await repoSearch('r', [1, 0], 1, 'local:minilm', {
+      query: 'Project Atlas',
+      hybrid: true,
+      graphAssist: false,
+    });
+    expect(disabled.results[0].text).toContain('Semantic winner');
+    expect(disabled.diagnostics.graphStatus).toBe('disabled');
+
+    const noMatch = await repoSearch('r', [1, 0], 1, 'local:minilm', { query: 'Unknown subject', hybrid: true });
+    expect(noMatch.results[0].text).toContain('Semantic winner');
+    expect(noMatch.diagnostics.graphStatus).toBe('no_match');
+
+    const semanticOnly = await repoSearch('r', [1, 0], 1, 'local:minilm', { query: 'Project Atlas', hybrid: false });
+    expect(semanticOnly.diagnostics.graphStatus).toBe('hybrid_disabled');
+
+    const staleArchive = await repoExportOne('r');
+    (staleArchive!.meta as { corpusRevision: number }).corpusRevision = 2;
+    await repoImportOne(staleArchive!, 'stale');
+    const stale = await repoSearch('stale', [1, 0], 1, 'local:minilm', { query: 'Project Atlas', hybrid: true });
+    expect(stale.results[0].text).toContain('Semantic winner');
+    expect(stale.diagnostics.graphStatus).toBe('stale_graph');
+  });
+
+  it('repoDocVectors returns just one document\'s already-computed vectors, correctly sliced from a multi-doc repo', async () => {
+    const { docId: docA } = await repoAdd('r', { name: 'a', url: 'file:///a' }, ['alpha one', 'alpha two'], [vec(8, 1), vec(8, 2)], {
+      embedModel: 'local:minilm',
+    });
+    const { docId: docB } = await repoAdd('r', { name: 'b', url: 'file:///b' }, ['beta one'], [vec(8, 3)]);
+
+    const a = await repoDocVectors('r', docA);
+    const b = await repoDocVectors('r', docB);
+
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    expect(a!.dim).toBe(8);
+    expect(a!.vectors.length).toBe(2 * 8); // 2 chunks for doc A
+    expect(b!.vectors.length).toBe(1 * 8); // 1 chunk for doc B
+
+    // Round-trip: dequantizing doc A's first chunk should approximate the
+    // same normalized vector repoAdd originally quantized and stored.
+    const expected = normalizeVector(vec(8, 1));
+    const actual = dequantizeVector(a!.vectors.subarray(0, 8), a!.perDimScale);
+    for (let i = 0; i < 8; i++) expect(actual[i]).toBeCloseTo(expected[i], 1);
+  });
+
+  it('repoDocVectors returns null for an unknown document or repo', async () => {
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    expect(await repoDocVectors('r', 'nope')).toBeNull();
+    expect(await repoDocVectors('no-such-repo', 'nope')).toBeNull();
+  });
+
+  it('increments corpus revisions after an add without deleting the existing graph/Studio outputs', async () => {
+    // Regression test: repoAdd used to delete graph.json/studio.json outright
+    // on every add (invalidateGraphArtifacts), destroying prior extraction
+    // work the moment one more document was added -- even though
+    // buildRepoGraph's own per-document coverage tracking already handles a
+    // new/changed document incrementally. The graph/studio file must survive
+    // an add; only repoGraphGet/repoStudioGet's own staleness gate (still
+    // enforced, unchanged) should refuse to serve it live until rebuilt.
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    expect((await repoGraphSnapshot('r')).corpusRevision).toBe(1);
+
+    const graph = emptyDocGraph();
+    mergeExtraction(graph, { entities: [{ label: 'A', type: 'x', summary: 's', evidence: ['s1'] }], relations: [] }, 'doc-1');
+    await repoGraphSet('r', graph, 1);
+    await repoStudioSet('r', {
+      outputs: { briefing: { kind: 'briefing', title: 'B', markdown: '# B', citations: [], generatedAt: '2026-01-01T00:00:00.000Z' } },
+    }, 1);
+
+    await repoAdd('r', { name: 'b', url: 'file:///b' }, ['world'], [vec(8, 2)], { embedModel: 'local:minilm' });
+
+    expect((await repoGraphSnapshot('r')).corpusRevision).toBe(2);
+    // Live-use getters still correctly refuse a graph/studio that's now
+    // behind the repo's current revision -- unchanged, and still correct.
+    expect(await repoGraphGet('r')).toBeNull();
+    expect(await repoStudioGet('r')).toEqual({ outputs: {} });
+    // But the underlying files were NOT deleted: an archive export still
+    // captures them, and a future build can resume from them incrementally.
+    const exported = await repoExportOne('r');
+    expect((exported?.graph as { nodes: Array<{ label: string }> } | undefined)?.nodes[0].label).toBe('A');
+    expect((exported?.studio as { outputs: { briefing?: { title: string } } } | undefined)?.outputs.briefing?.title).toBe('B');
+  });
+
+  it('rejects a graph checkpoint from an older corpus revision', async () => {
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    const graph = emptyDocGraph();
+    await repoAdd('r', { name: 'b', url: 'file:///b' }, ['world'], [vec(8, 2)], { embedModel: 'local:minilm' });
+
+    await expect(repoGraphSet('r', graph, 1)).rejects.toThrow('Repository changed while the graph was being built');
+    expect(await repoGraphGet('r')).toBeNull();
+  });
+
+  it('invalidates graph artifacts when a document is deleted', async () => {
+    const { docId } = await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    const graph = emptyDocGraph();
+    await repoGraphSet('r', graph, 1);
+
+    await repoDeleteDoc('r', docId);
+
+    expect((await repoGraphSnapshot('r')).corpusRevision).toBe(2);
     expect(await repoGraphGet('r')).toBeNull();
   });
 
@@ -242,8 +411,8 @@ describe('document graph', () => {
         briefing: { kind: 'briefing' as const, title: 'B', markdown: '# B [[x]]', citations: [], generatedAt: '2026-01-01T00:00:00.000Z' },
       },
     };
-    await repoStudioSet('r', doc);
-    expect(await repoStudioGet('r')).toEqual(doc);
+    await repoStudioSet('r', doc, 1);
+    expect(await repoStudioGet('r')).toEqual({ ...doc, corpusRevision: 1 });
   });
 });
 
@@ -253,5 +422,114 @@ describe('repoList', () => {
     await repoAdd('__memory__', { name: 'Fact', url: 'memory:m1' }, ['fact'], [vec(8, 2)], { embedModel: 'local:minilm', kind: 'memory' });
     const list = await repoList();
     expect(list.map((r) => r.name)).toEqual(['notes']);
+  });
+});
+
+describe('repoExportOne and repoImportOne', () => {
+  it('round-trips a single repository with metadata, chunks, overview, graph, and studio', async () => {
+    await repoAdd('Original Repo', { name: 'doc1.md', url: 'file:///doc1.md' }, ['Content chunk text.'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    
+    const overview: NotebookOverview = {
+      title: 'AI Notebook Title',
+      overviewMarkdown: 'Overview content.',
+      keyTopics: ['topic1'],
+      suggestedQuestions: ['Q1?'],
+      docCount: 1,
+      chunkCount: 1,
+      generatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    await repoNotebookSet('Original Repo', overview);
+    const graph = emptyDocGraph();
+    mergeExtraction(graph, { entities: [{ label: 'Archived entity', type: 'x', summary: 's', evidence: ['s1'] }], relations: [] }, 'doc-1');
+    await repoGraphSet('Original Repo', graph, 1);
+    await repoStudioSet('Original Repo', {
+      outputs: {
+        briefing: { kind: 'briefing', title: 'B', markdown: '# B', citations: [], generatedAt: '2026-01-01T00:00:00.000Z' },
+      },
+    }, 1);
+
+    const exported = await repoExportOne('Original Repo');
+    expect(exported).not.toBeNull();
+    expect(exported?.name).toBe('Original Repo');
+    expect(exported?.notebook).toEqual(overview);
+    expect((exported?.meta as { corpusRevision?: number }).corpusRevision).toBe(1);
+    expect((exported?.graph as { corpusRevision?: number }).corpusRevision).toBe(1);
+    expect((exported?.studio as { corpusRevision?: number }).corpusRevision).toBe(1);
+
+    // Import under a new target name
+    const impRes = await repoImportOne(exported!, 'Imported Repo');
+    expect(impRes.ok).toBe(true);
+    expect(impRes.name).toBe('Imported Repo');
+
+    // Verify imported notebook overview matches
+    const importedOverview = await repoNotebookGet('Imported Repo');
+    expect(importedOverview).toEqual(overview);
+    expect((await repoGraphGet('Imported Repo'))?.nodes[0].label).toBe('Archived entity');
+    expect((await repoStudioGet('Imported Repo')).outputs.briefing?.title).toBe('B');
+
+    // Verify search works in imported repo
+    const searchRes = await repoSearch('Imported Repo', vec(8, 1), 5);
+    expect(searchRes.results).toHaveLength(1);
+    expect(searchRes.results[0].text).toBe('Content chunk text.');
+  });
+
+  it('still exports a stale graph/studio (corpusRevision behind the current one), not silently dropped', async () => {
+    // Regression test: repoExportOne used to gate graph/studio inclusion on
+    // storedGraph.corpusRevision === corpusRevision(meta) -- so any time that
+    // invariant doesn't hold (e.g. an archive imported into an environment
+    // whose revision bookkeeping has since diverged), every subsequent "Save
+    // Archive" would silently exclude the graph/studio the user had already
+    // generated, with no warning. An archive exists to preserve generated
+    // work; staleness is already detected at use time elsewhere (repoSearch,
+    // repoGraphGet, GraphPanel), so export must not drop it.
+    await repoAdd('Stale Repo', { name: 'doc1.md', url: 'file:///doc1.md' }, ['Content chunk text.'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    const graph = emptyDocGraph();
+    mergeExtraction(graph, { entities: [{ label: 'Stale entity', type: 'x', summary: 's', evidence: ['s1'] }], relations: [] }, 'doc-1');
+    await repoGraphSet('Stale Repo', graph, 1);
+    await repoStudioSet('Stale Repo', {
+      outputs: { briefing: { kind: 'briefing', title: 'Stale briefing', markdown: '# B', citations: [], generatedAt: '2026-01-01T00:00:00.000Z' } },
+    }, 1);
+
+    // Reimport under a new name with the meta's corpusRevision bumped ahead of
+    // the graph/studio's -- repoImportOne (unlike repoAdd) writes exactly what
+    // an archive contains, so this reproduces "graph/studio present on disk but
+    // behind the repo's current revision" without relying on any particular
+    // internal call sequence.
+    const exported = await repoExportOne('Stale Repo');
+    (exported!.meta as { corpusRevision?: number }).corpusRevision = 2;
+    await repoImportOne(exported!, 'Stale Repo Imported');
+
+    const reExported = await repoExportOne('Stale Repo Imported');
+    expect((reExported?.meta as { corpusRevision?: number }).corpusRevision).toBe(2);
+    expect((reExported?.graph as { corpusRevision?: number } | undefined)?.corpusRevision).toBe(1);
+    expect((reExported?.studio as { corpusRevision?: number } | undefined)?.corpusRevision).toBe(1);
+    expect((reExported?.graph as { nodes: unknown[] } | undefined)?.nodes).toHaveLength(1);
+
+    const impRes = await repoImportOne(reExported!, 'Stale Repo Reimported');
+    expect(impRes.ok).toBe(true);
+    // repoGraphGet/repoStudioGet intentionally keep their own staleness gate
+    // (using a stale graph for live search citations would be a real
+    // correctness problem, unlike archiving it) -- verify via export instead,
+    // which is the archive path this test is about.
+    const reReExported = await repoExportOne('Stale Repo Reimported');
+    expect((reReExported?.graph as { nodes: Array<{ label: string }> } | undefined)?.nodes[0].label).toBe('Stale entity');
+    expect((reReExported?.studio as { outputs: { briefing?: { title: string } } } | undefined)?.outputs.briefing?.title).toBe('Stale briefing');
+  });
+
+  it('loads a legacy archive whose metadata and graph predate corpus revisions', async () => {
+    await repoAdd('Legacy', { name: 'doc.md', url: 'file:///doc.md' }, ['Legacy content.'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    const graph = emptyDocGraph();
+    mergeExtraction(graph, { entities: [{ label: 'Legacy', type: 'x', summary: 's', evidence: ['s1'] }], relations: [] }, 'doc-1');
+    await repoGraphSet('Legacy', graph, 1);
+    const exported = await repoExportOne('Legacy');
+    const meta = exported!.meta as { corpusRevision?: number };
+    const storedGraph = exported!.graph as { corpusRevision?: number };
+    delete meta.corpusRevision;
+    delete storedGraph.corpusRevision;
+
+    await repoImportOne(exported!, 'Legacy Imported');
+
+    expect((await repoGraphSnapshot('Legacy Imported')).corpusRevision).toBe(0);
+    expect((await repoGraphGet('Legacy Imported'))?.nodes[0].label).toBe('Legacy');
   });
 });

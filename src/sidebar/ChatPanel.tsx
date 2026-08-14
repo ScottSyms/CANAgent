@@ -8,7 +8,8 @@
 // button. All user actions leave through the `send` prop — see Sidebar.
 // =============================================================================
 
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { memo } from 'preact/compat';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { CapabilityRegistryEntry } from '../shared/capabilities';
 import type { SidebarCommand } from '../shared/messages';
 import type { AgentStatus, ChatMessageView, Citation, DataExport, FileArtifact, SiteEntry, Skill } from '../shared/types';
@@ -170,7 +171,58 @@ function MessageImages({ images }: { images: string[] }) {
   );
 }
 
-export function ChatPanel({
+/**
+ * One chat message. Memoized and self-contained (its own copy-to-clipboard
+ * state) so that a `tool_activity`/`context_update`/etc. tick in the parent —
+ * which can fire many times per agent turn — doesn't re-run every message's
+ * render function (including re-splitting its sources and re-sanitizing its
+ * markdown) when only the parent's unrelated state changed.
+ */
+const MessageRow = memo(function MessageRow({
+  message: m,
+  onCiteClick,
+}: {
+  message: ChatMessageView;
+  onCiteClick: (c: Citation) => void;
+}) {
+  const tr = useT();
+  const [copied, setCopied] = useState(false);
+  const { body, sources } = useMemo(
+    () => (m.role === 'assistant' ? splitSources(m.text) : { body: m.text, sources: null }),
+    [m.role, m.text],
+  );
+  const copy = async () => {
+    await navigator.clipboard.writeText(m.text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div class={`msg msg-${m.role}`}>
+      {m.images && m.images.length > 0 && <MessageImages images={m.images} />}
+      {m.role === 'assistant' ? (
+        <>
+          <Markdown text={body} citations={m.citations} onCiteClick={onCiteClick} />
+          {sources && (
+            <div class="citations">
+              <Markdown text={sources} />
+            </div>
+          )}
+          <div class="msg-actions">
+            <button class="copy-btn" title="Copy to clipboard" onClick={copy}>
+              {copied ? tr('chat.copied') : tr('chat.copy')}
+            </button>
+          </div>
+        </>
+      ) : (
+        m.text
+      )}
+      {m.dataExport && <DataExportCard data={m.dataExport} />}
+      {m.fileArtifact && <FileArtifactCard file={m.fileArtifact} />}
+    </div>
+  );
+});
+
+export const ChatPanel = memo(function ChatPanel({
   messages,
   status,
   approval,
@@ -190,7 +242,11 @@ export function ChatPanel({
   // bold). `text` mirrors its plain text for logic/button state; the element
   // itself is uncontrolled — never re-render its content from state.
   const [text, setText] = useState('');
-  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  // How many of the most recent messages to mount. A long-running session's
+  // conversation would otherwise keep every message (markdown HTML, citation
+  // chips, images) mounted forever — unbounded DOM/memory growth for a panel
+  // meant to stay open all day. Grows via "Load earlier messages"; never shrinks.
+  const [visibleCount, setVisibleCount] = useState(50);
   // The sentence-level citation currently being inspected (chip click), or null.
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -419,12 +475,6 @@ export function ChatPanel({
     syncText();
   };
 
-  const copyMessage = async (index: number, text: string) => {
-    await navigator.clipboard.writeText(text);
-    setCopiedIndex(index);
-    setTimeout(() => setCopiedIndex((c) => (c === index ? null : c)), 1500);
-  };
-
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [messages, approval, authNotice, permissionNotice]);
@@ -563,37 +613,16 @@ export function ChatPanel({
             </a>
           </div>
         )}
-        {messages.map((m, i) => {
-          const { body, sources } = m.role === 'assistant' ? splitSources(m.text) : { body: m.text, sources: null };
-          return (
-          <div key={i} class={`msg msg-${m.role}`}>
-            {m.images && m.images.length > 0 && <MessageImages images={m.images} />}
-            {m.role === 'assistant' ? (
-              <>
-                <Markdown text={body} citations={m.citations} onCiteClick={setActiveCitation} />
-                {sources && (
-                  <div class="citations">
-                    <Markdown text={sources} />
-                  </div>
-                )}
-                <div class="msg-actions">
-                  <button
-                    class="copy-btn"
-                    title="Copy to clipboard"
-                    onClick={() => copyMessage(i, m.text)}
-                  >
-                    {copiedIndex === i ? tr('chat.copied') : tr('chat.copy')}
-                  </button>
-                </div>
-              </>
-            ) : (
-              m.text
-            )}
-            {m.dataExport && <DataExportCard data={m.dataExport} />}
-            {m.fileArtifact && <FileArtifactCard file={m.fileArtifact} />}
+        {messages.length > visibleCount && (
+          <div class="chat-load-earlier">
+            <button class="btn btn-small" onClick={() => setVisibleCount((n) => n + 50)}>
+              {tr('chat.loadEarlier', { n: String(messages.length - visibleCount) })}
+            </button>
           </div>
-          );
-        })}
+        )}
+        {messages.slice(-visibleCount).map((m, i) => (
+          <MessageRow key={Math.max(0, messages.length - visibleCount) + i} message={m} onCiteClick={setActiveCitation} />
+        ))}
 
         {authNotice && (
           <div class="prompt-card">
@@ -880,4 +909,4 @@ export function ChatPanel({
       </div>
     </div>
   );
-}
+});

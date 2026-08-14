@@ -61,6 +61,8 @@ export interface HybridParams extends SearchParams {
   rrfK?: number;
   pool?: number;
   keywordIndex?: KeywordIndex;
+  /** Optional pre-ranked chunk lists from grounded retrieval sources such as a knowledge graph. */
+  supplementalRankings?: RankedItem[][];
 }
 
 export interface MultiHybridParams extends Omit<SearchParams, 'queryVector'> {
@@ -70,6 +72,8 @@ export interface MultiHybridParams extends Omit<SearchParams, 'queryVector'> {
   rrfK?: number;
   pool?: number;
   keywordIndex?: KeywordIndex;
+  /** Optional pre-ranked chunk lists from grounded retrieval sources such as a knowledge graph. */
+  supplementalRankings?: RankedItem[][];
 }
 
 /**
@@ -80,11 +84,15 @@ export interface MultiHybridParams extends Omit<SearchParams, 'queryVector'> {
 export function hybridSearch(params: HybridParams): SearchHit[] {
   const { chunks, query, k, dim, perDimScale, chunkCount, vectors, queryVector } = params;
   if (chunkCount === 0) return [];
-  const semantic = scoreVectors({ dim, perDimScale, chunkCount, vectors, queryVector });
+  const pool = params.pool ?? Math.max(k * 10, 50);
+  // Fusion only ever consumes each list's top `pool` entries, so the dense
+  // ranking only needs its top-`pool` computed, not a full sort of the corpus.
+  const semantic = scoreVectors({ dim, perDimScale, chunkCount, vectors, queryVector }, pool);
   const keyword = params.keywordIndex ? bm25RankIndexed({ index: params.keywordIndex, query }) : bm25Rank({ chunks, query });
   // No query terms matched anything lexically: nothing to fuse, just use dense.
   const lists = keyword.length > 0 ? [semantic, keyword] : [semantic];
-  return fuseRRF({ lists, k, rrfK: params.rrfK, pool: params.pool })
+  for (const ranking of params.supplementalRankings ?? []) if (ranking.length > 0) lists.push(ranking);
+  return fuseRRF({ lists, k, rrfK: params.rrfK, pool })
     .map(({ i, score }) => {
       const c = chunks[i];
       return c ? chunkToHit(c, score) : null;
@@ -95,16 +103,18 @@ export function hybridSearch(params: HybridParams): SearchHit[] {
 export function multiHybridSearch(params: MultiHybridParams): SearchHit[] {
   const { chunks, k, queryVectors, queries = [], hybrid = true } = params;
   if (params.chunkCount === 0 || queryVectors.length === 0) return [];
+  const pool = params.pool ?? Math.max(k * 10, 50);
   const lists: RankedItem[][] = [];
   for (let i = 0; i < queryVectors.length; i++) {
-    lists.push(scoreVectors({ ...params, queryVector: queryVectors[i] }));
+    lists.push(scoreVectors({ ...params, queryVector: queryVectors[i] }, pool));
     const q = queries[i];
     if (hybrid && q) {
       const keyword = params.keywordIndex ? bm25RankIndexed({ index: params.keywordIndex, query: q }) : bm25Rank({ chunks, query: q });
       if (keyword.length > 0) lists.push(keyword);
     }
   }
-  return fuseRRF({ lists, k, rrfK: params.rrfK, pool: params.pool })
+  for (const ranking of params.supplementalRankings ?? []) if (ranking.length > 0) lists.push(ranking);
+  return fuseRRF({ lists, k, rrfK: params.rrfK, pool })
     .map(({ i, score }) => {
       const c = chunks[i];
       return c ? chunkToHit(c, score) : null;

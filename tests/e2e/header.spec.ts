@@ -83,4 +83,24 @@ test.describe('header overflow menu', () => {
     await expect(sidebar.getByRole('menuitem', { name: /Save conversation/ })).toBeFocused();
     await sidebar.keyboard.press('Escape');
   });
+
+  test('glass chrome adapts to dark, reduced-motion, and forced-color modes', async ({ sidebar }) => {
+    await sidebar.setViewportSize({ width: 400, height: 700 });
+    await sidebar.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' });
+
+    const darkSurface = await sidebar.evaluate(() =>
+      getComputedStyle(document.documentElement).getPropertyValue('--glass-surface').trim(),
+    );
+    expect(darkSurface).toBe('#262031');
+    const transitionDuration = await sidebar.locator('.header .icon-btn').first().evaluate(
+      (element) => getComputedStyle(element).transitionDuration,
+    );
+    expect(transitionDuration).toBe('0s');
+
+    await sidebar.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce', forcedColors: 'active' });
+    expect(await sidebar.evaluate(() => matchMedia('(forced-colors: active)').matches)).toBe(true);
+    const history = sidebar.getByRole('button', { name: 'Conversation history' });
+    await history.focus();
+    expect(await history.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe('none');
+  });
 });

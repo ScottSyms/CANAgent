@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Settings } from '../shared/types';
+import { DEFAULT_LOCAL_EMBED_MODEL, type Settings } from '../shared/types';
 
 // embedChunks routes the local path through the offscreen embedder; mock it so we
 // can assert dispatch without a browser/transformers runtime.
@@ -17,7 +17,7 @@ afterEach(() => {
 
 describe('embedderId', () => {
   it('defaults to the local MiniLM model', () => {
-    expect(embedderId(base)).toBe('local:Xenova/all-MiniLM-L6-v2');
+    expect(embedderId(base)).toBe(`local:${DEFAULT_LOCAL_EMBED_MODEL}`);
   });
 
   it('honors a custom local model id', () => {
@@ -36,10 +36,10 @@ describe('embedderId', () => {
 
 describe('embedChunks dispatch', () => {
   it('routes to the on-device embedder by default', async () => {
-    embedLocal.mockResolvedValue({ ok: true, vectors: [[1, 2, 3]], model: 'Xenova/all-MiniLM-L6-v2' });
+    embedLocal.mockResolvedValue({ ok: true, vectors: [[1, 2, 3]], model: DEFAULT_LOCAL_EMBED_MODEL });
     const out = await embedChunks(base, ['hello']);
     expect(out).toEqual([[1, 2, 3]]);
-    expect(embedLocal).toHaveBeenCalledWith(['hello'], 'Xenova/all-MiniLM-L6-v2');
+    expect(embedLocal).toHaveBeenCalledWith(['hello'], DEFAULT_LOCAL_EMBED_MODEL);
   });
 
   it('throws a clear error when the local embedder fails', async () => {

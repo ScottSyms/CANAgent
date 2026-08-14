@@ -59,6 +59,8 @@ export function LabelPicker({
 }: Props) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   const [editing, setEditing] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
   const [newName, setNewName] = useState('');
@@ -104,20 +106,23 @@ export function LabelPicker({
   // both the trigger button and this panel), so clicking the trigger to close
   // doesn't first fire an outside-close that the trigger then re-opens.
   useEffect(() => {
+    const trigger = ref.current?.parentElement?.querySelector<HTMLButtonElement>('button');
+    ref.current?.querySelector<HTMLElement>('button, input')?.focus();
     const onDown = (e: MouseEvent) => {
       const boundary = ref.current?.parentElement ?? ref.current;
-      if (boundary && !boundary.contains(e.target as Node)) onClose();
+      if (boundary && !boundary.contains(e.target as Node)) onCloseRef.current();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') onCloseRef.current();
     };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
     return () => {
       document.removeEventListener('mousedown', onDown);
       document.removeEventListener('keydown', onKey);
+      if (trigger?.isConnected) trigger.focus();
     };
-  }, [onClose]);
+  }, []);
 
   const startEdit = (l: ConversationLabel) => {
     setEditing(l.id);
@@ -137,7 +142,7 @@ export function LabelPicker({
   };
 
   return (
-    <div class="label-picker" ref={ref} role="dialog">
+    <div class="label-picker" ref={ref} role="dialog" aria-label={t('conversations.labels')}>
       <div class="label-picker-head">
         <span class="label-picker-title">{t('conversations.labels')}</span>
         {clearLabel && onClear && (

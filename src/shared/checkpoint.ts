@@ -25,6 +25,9 @@ export interface InFlightCheckpoint {
   lastTaskUrl?: string;
   lastUserText: string;
   unattended: boolean;
+  /** Preserve enforced repository sourcing across service-worker recovery. */
+  repoOnlyRepos?: string[];
+  webFallbackApproved?: boolean;
   /** How many times this interruption has already been auto-resumed (see recovery.ts). */
   recoveryAttempts?: number;
   updatedAt: string; // ISO-8601

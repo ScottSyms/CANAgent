@@ -78,6 +78,16 @@ describe('hybridSearch', () => {
     expect(hits[0].name).toBe('a');
   });
 
+  it('fuses a supplemental graph ranking with semantic and lexical rankings', () => {
+    const hits = hybridSearch({
+      ...base,
+      query: 'no lexical match',
+      k: 1,
+      supplementalRankings: [[{ i: 1, score: 100 }]],
+    });
+    expect(hits[0].name).toBe('b');
+  });
+
   it('returns [] for an empty repo', () => {
     expect(hybridSearch({ ...base, chunkCount: 0, query: 'anything' })).toEqual([]);
   });
@@ -91,5 +101,16 @@ describe('hybridSearch', () => {
       k: 3,
     });
     expect(hits.map((h) => h.name)).toContain('b');
+  });
+
+  it('fuses graph rankings alongside multiple query variants', () => {
+    const hits = multiHybridSearch({
+      ...base,
+      queryVectors: [[1, 0]],
+      queries: ['no lexical match'],
+      supplementalRankings: [[{ i: 1, score: 100 }]],
+      k: 1,
+    });
+    expect(hits[0].name).toBe('b');
   });
 });

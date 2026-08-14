@@ -46,8 +46,7 @@ body {
   justify-content: center;
   padding: 16px;
   pointer-events: none;
-  background: color-mix(in srgb, var(--bg) 78%, transparent);
-  backdrop-filter: blur(1px);
+  background: var(--scrim-soft);
 }
 .drop-overlay-card {
   display: flex;
@@ -80,10 +79,12 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 2px solid transparent;
-  border-image: var(--brand-grad) 1;
-  background: linear-gradient(var(--bg-panel), var(--bg));
+  padding: 10px 11px;
+  position: relative;
+  z-index: 20;
+  border: 0;
+  border-bottom: 1px solid var(--glass-border);
+  border-radius: 0;
 }
 
 .brand {
@@ -145,8 +146,8 @@ body {
 
 .status-thinking,
 .status-acting {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
+  background: var(--chip-violet-bg);
+  color: var(--chip-violet-fg);
 }
 
 /* Working states are signalled by a calm pulse on the status dot — legible and
@@ -169,12 +170,12 @@ body {
 .status-paused,
 .status-auth_required,
 .status-awaiting_approval {
-  background: color-mix(in srgb, var(--warn) 18%, transparent);
-  color: var(--warn);
+  background: var(--chip-amber-bg);
+  color: var(--chip-amber-fg);
 }
 .status-error {
-  background: color-mix(in srgb, var(--error) 18%, transparent);
-  color: var(--error);
+  background: var(--chip-red-bg);
+  color: var(--chip-red-fg);
 }
 
 /* Right-hand control cluster */
@@ -242,6 +243,7 @@ body {
   line-height: 1;
   padding: 3px 5px;
   border-radius: 6px;
+  min-height: 28px;
 }
 .scale-btn {
   font-size: 13px;
@@ -335,9 +337,9 @@ body {
   align-items: center;
   gap: 6px;
   padding: 6px 11px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--accent-fill);
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--accent-fill);
   color: #fff;
   cursor: pointer;
   line-height: 1;
@@ -349,8 +351,8 @@ body {
 }
 
 .new-chat-btn:hover:not(:disabled) {
-  background: var(--accent-dim);
-  border-color: var(--accent-dim);
+  background: var(--accent-fill-hover);
+  border-color: var(--accent-fill-hover);
 }
 
 .new-chat-btn:active:not(:disabled) {
@@ -402,16 +404,16 @@ body {
   flex: none;
 }
 .banner-error {
-  background: rgba(224, 93, 93, 0.15);
-  color: var(--error);
+  background: var(--chip-red-bg);
+  color: var(--chip-red-fg);
 }
 .banner-warn {
-  background: rgba(216, 160, 29, 0.15);
-  color: var(--warn);
+  background: var(--chip-amber-bg);
+  color: var(--chip-amber-fg);
 }
 .banner-ok {
-  background: rgba(63, 185, 108, 0.15);
-  color: var(--ok);
+  background: var(--chip-green-bg);
+  color: var(--chip-green-fg);
 }
 
 /* Tab context panel */
@@ -648,7 +650,7 @@ body {
   padding: 6px 8px;
   border: 1px solid var(--accent);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: var(--brand-soft);
 }
 .distill-chip span {
   flex: 1;
@@ -678,6 +680,12 @@ body {
   text-align: center;
   padding: 0 16px;
   line-height: 1.5;
+}
+
+.chat-load-earlier {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 6px;
 }
 
 .msg {
@@ -818,16 +826,14 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 15px;
-  height: 15px;
+  min-width: 20px;
+  height: 20px;
   padding: 0 4px;
   margin: 0 1px;
   border-radius: 7px;
-  /* Filled accent pill with background-colored digits, so the number stays
-     legible at rest. (--accent-dim is a *darker* accent shade, not a light
-     tint, so accent-on-dim washed the number out until hover.) */
-  background: var(--accent);
-  color: var(--bg);
+  /* The darker fill token keeps white digits AA-compliant in both themes. */
+  background: var(--accent-fill);
+  color: #fff;
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
@@ -836,7 +842,7 @@ body {
   user-select: none;
 }
 .citation-chip:hover {
-  background: var(--accent-dim);
+  background: var(--accent-fill-hover);
 }
 
 /* Citation source viewer (opened by clicking a chip) */
@@ -882,6 +888,9 @@ body {
   font-size: 20px;
   line-height: 1;
   cursor: pointer;
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 8px;
 }
 .citation-view-chunk {
   margin: 0 0 12px;
@@ -904,6 +913,49 @@ body {
 }
 .citation-view-link:hover {
   text-decoration: underline;
+}
+
+.doc-windows-view {
+  max-height: 80%;
+}
+.doc-window {
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.doc-window:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+.doc-window-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.doc-window-status {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border: 1px solid;
+  border-radius: 999px;
+}
+.doc-window-text {
+  margin: 0;
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
 }
 
 .msg-actions {
@@ -941,7 +993,7 @@ body {
   border-radius: 10px;
   padding: 10px 12px;
   font-size: 13px;
-  background: rgba(216, 160, 29, 0.08);
+  background: var(--chip-amber-bg);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1331,7 +1383,6 @@ body {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--bg-card);
-  box-shadow: var(--shadow-1);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1352,13 +1403,13 @@ body {
 }
 
 .btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
   color: #fff;
 }
 .btn-primary:hover:not(:disabled) {
-  background: var(--accent-dim);
-  border-color: var(--accent-dim);
+  background: var(--accent-fill-hover);
+  border-color: var(--accent-fill-hover);
 }
 
 .btn-small {
@@ -1457,6 +1508,11 @@ body {
   flex-direction: column;
   gap: 12px;
   box-shadow: var(--shadow-2);
+}
+
+.settings-card:focus,
+.citation-view:focus {
+  outline: none;
 }
 
 .settings-header {
@@ -1614,7 +1670,6 @@ body {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 14px;
-  box-shadow: var(--shadow-1);
 }
 /* Fields stack vertically inside a group by default — the flex-basis meant
    for horizontal .field-row layouts would otherwise stretch a lone field's
@@ -1824,7 +1879,6 @@ body {
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--bg-card);
-  box-shadow: var(--shadow-1);
   overflow: hidden;
 }
 .settings-card .settings-acc + .settings-acc {
@@ -2012,7 +2066,6 @@ body {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--bg-card);
-  box-shadow: var(--shadow-1);
 }
 
 .skills-toolbar-actions {
@@ -2060,14 +2113,11 @@ body {
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--bg-card);
-  box-shadow: var(--shadow-1);
-  transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+  transition: border-color 0.12s ease;
 }
 
 .skills-card:hover {
-  transform: translateY(-1px);
   border-color: var(--accent);
-  box-shadow: var(--shadow-2);
 }
 
 .skills-card-head {
@@ -2133,33 +2183,33 @@ body {
 }
 
 .skills-tag-version {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--chip-violet-fg);
+  background: var(--chip-violet-bg);
 }
 
 .skills-tag-source {
-  color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--chip-amber-fg);
+  background: var(--chip-amber-bg);
 }
 
 .skills-tag-origin {
-  color: var(--ok);
-  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  color: var(--chip-green-fg);
+  background: var(--chip-green-bg);
 }
 
 .skills-tag-button {
   color: var(--text);
-  background: color-mix(in srgb, var(--text) 7%, transparent);
+  background: var(--bg-input);
 }
 
 .skills-tag-project {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--chip-violet-fg);
+  background: var(--chip-violet-bg);
 }
 
 .skills-tag-installed {
-  color: var(--ok);
-  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  color: var(--chip-green-fg);
+  background: var(--chip-green-bg);
 }
 
 .skills-empty {
@@ -2187,7 +2237,6 @@ body {
   padding: 14px;
   border-radius: 14px;
   background: var(--bg-card);
-  box-shadow: var(--shadow-1);
 }
 
 .skills-form .settings-actions {
@@ -2516,8 +2565,8 @@ body {
 }
 
 .label-edit {
-  width: 24px;
-  height: 24px;
+  width: 30px;
+  height: 30px;
   flex: none;
 }
 
@@ -2556,8 +2605,8 @@ body {
 }
 
 .label-swatch {
-  width: 18px;
-  height: 18px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   border: 2px solid transparent;
   cursor: pointer;
@@ -2566,4 +2615,48 @@ body {
 
 .label-swatch.is-picked {
   border-color: var(--text);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .drop-overlay {
+    background: var(--bg);
+  }
+}
+
+@media (prefers-contrast: more) {
+  .header {
+    border-bottom: 2px solid currentColor;
+    box-shadow: none;
+  }
+
+  .status-thinking,
+  .status-acting,
+  .status-paused,
+  .status-auth_required,
+  .status-awaiting_approval,
+  .status-error,
+  .banner,
+  .skills-tag {
+    outline: 1px solid currentColor;
+    outline-offset: -1px;
+  }
+}
+
+@media (forced-colors: active) {
+  .header,
+  .banner,
+  .status,
+  .prompt-card,
+  .distill-chip,
+  .skills-tag,
+  .drop-overlay-card {
+    color: CanvasText;
+    background: Canvas;
+    border-color: CanvasText;
+    box-shadow: none;
+  }
+
+  :where(a[href], button, [role='tab'], [tabindex]:not([tabindex='-1'])):focus-visible {
+    outline-color: Highlight;
+  }
 }

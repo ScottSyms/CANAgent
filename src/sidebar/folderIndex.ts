@@ -184,14 +184,21 @@ async function toUploadFile(
   }
 }
 
-async function ingestOne(repo: string, payload: UploadFile): Promise<boolean> {
+// Files ready to store are grouped into batches of this size before sending
+// `add_files_to_repo`, instead of one message (and one repo store write) per
+// file — the store write itself is now O(1) amortized per file within a
+// batch (see repoStore.repoAddBatch), so a large folder no longer costs O(N²)
+// as sync progresses.
+const INGEST_BATCH_SIZE = 15;
+
+async function ingestBatch(repo: string, payloads: UploadFile[]): Promise<boolean[]> {
   const back = (await chrome.runtime.sendMessage({
     type: 'add_files_to_repo',
     repo,
-    files: [payload],
+    files: payloads,
     kind: 'folder',
   })) as AddFilesResponse;
-  return Boolean(back?.results?.[0]?.ok);
+  return payloads.map((_, i) => Boolean(back?.results?.[i]?.ok));
 }
 
 async function deleteDoc(repo: string, docId: string): Promise<void> {
@@ -214,6 +221,18 @@ export async function syncFolderFiles(
   for (const d of existing) if (d.path) byPath.set(d.path, d);
   const seen = new Set<string>();
 
+  // Files ready to store, batched — flushed at INGEST_BATCH_SIZE and at the end.
+  const pending: Array<{ payload: UploadFile; isUpdate: boolean }> = [];
+  const flush = async () => {
+    if (pending.length === 0) return;
+    const oks = await ingestBatch(repo, pending.map((p) => p.payload));
+    pending.forEach(({ isUpdate }, i) => {
+      if (oks[i]) isUpdate ? prog.updated++ : prog.added++;
+      else prog.failed++;
+    });
+    pending.length = 0;
+  };
+
   for (const w of picked) {
     seen.add(w.path);
     const prior = byPath.get(w.path);
@@ -231,10 +250,14 @@ export async function syncFolderFiles(
       continue;
     }
     if (prior) await deleteDoc(repo, prior.id); // re-ingest cleanly
-    const ok = await ingestOne(repo, payload);
-    if (ok) prior ? prog.updated++ : prog.added++;
-    else prog.failed++;
+    pending.push({ payload, isUpdate: Boolean(prior) });
+    if (pending.length >= INGEST_BATCH_SIZE) {
+      await flush();
+      onProgress?.({ ...prog, current: w.path });
+    }
   }
+  await flush();
+  onProgress?.({ ...prog, current: picked[picked.length - 1]?.path });
 
   // Drop docs whose file is no longer in the selection.
   for (const d of existing) {

@@ -1,6 +1,6 @@
 import type { Settings } from '../../shared/types';
 import { resolve } from '../llmNetwork';
-import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ToolDefinition } from '../llmTypes';
+import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ResponseFormatSpec, ToolDefinition } from '../llmTypes';
 import { LlmError } from '../llmTypes';
 import { toAnthropicTools } from './toolSchema';
 import type { AdapterRequest, ProtocolAdapter } from './types';
@@ -40,6 +40,11 @@ interface AnthropicMessage {
 function parseDataUrl(url: string): { mediaType: string; data: string } {
   const match = /^data:([^;]+);base64,(.*)$/s.exec(url);
   return match ? { mediaType: match[1], data: match[2] } : { mediaType: 'image/jpeg', data: url };
+}
+
+function buildAnthropicUrl(base: string): string {
+  const versionedBase = /\/v1$/.test(base) ? base : `${base}/v1`;
+  return `${versionedBase}/messages`;
 }
 
 function toBlocks(content: ContentPart[]): AnthropicBlock[] {
@@ -94,7 +99,12 @@ function buildMessages(messages: LlmMessage[]): { system: string | undefined; me
 }
 
 export const anthropicMessagesAdapter: ProtocolAdapter = {
-  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[]): AdapterRequest {
+  // `responseFormat` is intentionally unused: the Messages API has no native
+  // schema-constrained-decoding field (unlike OpenAI's response_format,
+  // Gemini's responseSchema, or Ollama/llama.cpp's grammar-backed `format`).
+  // This protocol keeps relying on prompt-based JSON instructions plus the
+  // existing looksTruncated/extractWindowAdaptive recovery in graphExtract.ts.
+  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[], _responseFormat?: ResponseFormatSpec): AdapterRequest {
     const { system, messages: anthropicMessages } = buildMessages(messages);
     const body: Record<string, unknown> = {
       model: settings.model,
@@ -103,15 +113,17 @@ export const anthropicMessagesAdapter: ProtocolAdapter = {
     };
     if (system) body.system = system;
     if (tools && tools.length > 0) body.tools = toAnthropicTools(tools);
-    if (settings.temperature !== undefined) body.temperature = settings.temperature;
+    // Some Claude deployments enable thinking modes that reject `temperature`.
+    // It is optional in Messages requests, so provider defaults are the portable choice.
 
     const { base, key } = resolve(settings, 'chat');
     return {
-      url: `${base}/v1/messages`,
+      url: buildAnthropicUrl(base),
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': key,
         'anthropic-version': ANTHROPIC_VERSION,
+        'anthropic-dangerous-direct-browser-access': 'true',
       },
       body,
     };

@@ -1,6 +1,6 @@
 import type { Settings } from '../../shared/types';
 import { resolve } from '../llmNetwork';
-import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ToolDefinition } from '../llmTypes';
+import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ResponseFormatSpec, ToolDefinition } from '../llmTypes';
 import { LlmError } from '../llmTypes';
 import { toResponsesTools } from './toolSchema';
 import type { AdapterRequest, ProtocolAdapter } from './types';
@@ -62,14 +62,18 @@ function buildInput(messages: LlmMessage[]): ResponsesInputItem[] {
 }
 
 export const openaiResponsesAdapter: ProtocolAdapter = {
-  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[]): AdapterRequest {
+  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[], responseFormat?: ResponseFormatSpec): AdapterRequest {
     const body: Record<string, unknown> = {
       model: settings.model,
       input: buildInput(messages),
     };
     if (tools && tools.length > 0) body.tools = toResponsesTools(tools);
-    if (settings.temperature !== undefined) body.temperature = settings.temperature;
+    // Reasoning-capable Responses models may reject `temperature`; it is optional.
     if (settings.maxTokens !== undefined) body.max_output_tokens = settings.maxTokens;
+    // /responses uses `text.format`, a different key/shape than /chat/completions' `response_format`.
+    if (responseFormat) {
+      body.text = { format: { type: 'json_schema', name: responseFormat.name, schema: responseFormat.schema, strict: true } };
+    }
 
     const { base, key } = resolve(settings, 'chat');
     return {

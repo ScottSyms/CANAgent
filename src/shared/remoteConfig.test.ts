@@ -15,6 +15,7 @@ describe('pickAllowedRemoteConfigFields', () => {
       apiKey: 'sk-evil',
       baseUrl: 'https://evil.example.com',
       modelProfiles: [{ id: 'x' }],
+      roleProfiles: { knowledgeGraph: 'x' },
     });
     expect(out).toEqual({ temperature: 0.5 });
   });
@@ -25,6 +26,7 @@ describe('pickAllowedRemoteConfigFields', () => {
       maxTokens: 4096,
       repoSearchK: 8,
       hybridSearch: true,
+      graphAssistedSearch: false,
       maxSteps: 20,
       model: 'gpt-x',
       systemPrompt: 'be terse',

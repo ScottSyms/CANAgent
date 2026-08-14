@@ -45,6 +45,36 @@ export const DEFAULT_PROMPTS: Record<PromptKey, string> = {
     'summary = one sentence; relation = short verb phrase; from/to = entity labels that appear in your entities list. ' +
     'Only cite ids that appear in the text; do not invent ids or facts.',
 
+  graphExtractionSentence:
+    'You extract facts from ONE target sentence. You are given CONTEXT BEFORE, a TARGET, and CONTEXT AFTER, each a list ' +
+    'of sentences prefixed with a [[id]] marker. Extract entities and relationships stated in the TARGET sentence ONLY. ' +
+    'Use CONTEXT BEFORE and CONTEXT AFTER only to resolve what a pronoun or reference in the TARGET means (e.g. "he" ' +
+    '= a person named earlier) — never extract a fact that is only stated in the context, and never cite a context ' +
+    'sentence id. Entity type must be one of: PERSON, ORGANIZATION, LOCATION, SYSTEM, PROJECT, DOCUMENT, EVENT, DATE, ' +
+    'OTHER. Extract only what the TARGET sentence explicitly states — do not infer facts merely because they are ' +
+    'plausible. If the TARGET has nothing extractable, or a reference cannot be resolved from the given context, omit ' +
+    'it; an empty result is valid and expected for many sentences. Return ONLY JSON of the form: ' +
+    '{"entities":[{"label":string,"type":string,"summary":string,"evidence":string[]}],' +
+    '"relations":[{"from":string,"to":string,"relation":string,"evidence":string[]}]}. ' +
+    'label = canonical entity name (the resolved name, not the pronoun, when context makes it clear); ' +
+    'summary = one short phrase; relation = short verb phrase; from/to = entity labels in your entities list; ' +
+    'evidence = the TARGET sentence\'s id only, WITHOUT the brackets. Do not invent ids or facts.',
+
+  graphExtractionGleaning:
+    'Re-check the same document text against the entities and relationships you just extracted. Report ONLY the ' +
+    'ones you missed the first time — do not repeat anything already found. Same rules as before: use ONLY the ' +
+    'given text, cite supporting sentence ids (WITHOUT the [[ ]] brackets), and do not invent ids or facts. Return ' +
+    'ONLY JSON of the same form: {"entities":[{"label":string,"type":string,"summary":string,"evidence":string[]}],' +
+    '"relations":[{"from":string,"to":string,"relation":string,"evidence":string[]}]}. If nothing was missed, ' +
+    'return {"entities":[],"relations":[]} — an empty result is valid and expected.',
+
+  graphRelationTyping:
+    'You are given two entities and one sentence where they both appear. If the sentence states a real ' +
+    'relationship between Entity A and Entity B, name it as a short verb phrase (2-4 words, e.g. "works for", ' +
+    '"reports to", "depends on"). If the sentence does not clearly state a relationship between them, or only ' +
+    'shows they were merely mentioned together, return "co-occurs with". Return ONLY JSON of the form: ' +
+    '{"relation": string}. Do not invent a relationship the sentence does not support.',
+
   communitySummary:
     'You summarize a cluster of related entities from a document corpus into a theme. The cluster is given as ' +
     'entities and relationships, each tagged with [[id]] evidence markers. Using ONLY the given text, return ONLY JSON: ' +

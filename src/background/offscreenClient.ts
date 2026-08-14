@@ -18,6 +18,8 @@ import type {
   GenerateDocumentResponse,
   GeneratePresentationRequest,
   SlideSpec,
+  NerLocalRequest,
+  NerLocalResponse,
   ProductMeta,
   ProductRequest,
   ProductResponse,
@@ -32,6 +34,44 @@ import type { DocGraph } from '../shared/docGraph';
 // runs in an offscreen document created on demand.
 
 let creating: Promise<void> | null = null;
+const OFFSCREEN_TIMEOUT_MS = 120_000;
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+}
+
+/** Bound extension-message waits and let Stop release the caller immediately. */
+function waitForOffscreen<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortReason(signal));
+      return;
+    }
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new DOMException('The repository engine did not respond in time.', 'TimeoutError'));
+    }, OFFSCREEN_TIMEOUT_MS);
+    const onAbort = () => {
+      cleanup();
+      reject(abortReason(signal as AbortSignal));
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
 
 async function hasOffscreen(): Promise<boolean> {
   if (!chrome.runtime.getContexts) return false;
@@ -101,14 +141,15 @@ export async function generatePresentation(
  * the offscreen doc is probably crashed or was killed by Chrome, so we force-
  * recreate it and retry once more rather than giving up.
  */
-async function sendOffscreen<T>(request: unknown): Promise<T | { ok: false; error: string }> {
+async function sendOffscreen<T>(request: unknown, signal?: AbortSignal): Promise<T | { ok: false; error: string }> {
   const doSend = async (): Promise<T | { ok: false; error: string }> => {
     for (let attempt = 0; ; attempt++) {
       try {
-        return (await chrome.runtime.sendMessage(request)) as T;
+        return await waitForOffscreen(chrome.runtime.sendMessage(request) as Promise<T>, signal);
       } catch (e) {
+        if (signal?.aborted) throw abortReason(signal);
         if (attempt < 15 && /Receiving end does not exist|establish connection/i.test(String(e))) {
-          await new Promise((r) => setTimeout(r, 100));
+          await waitForOffscreen(new Promise((r) => setTimeout(r, 100)), signal);
           continue;
         }
         return { ok: false, error: String(e) };
@@ -141,14 +182,27 @@ async function closeAndRecreate(): Promise<void> {
 }
 
 /** Embed text on-device with the offscreen transformers.js model (local RAG). */
-export async function embedLocal(texts: string[], model?: string): Promise<EmbedLocalResponse> {
+export async function embedLocal(texts: string[], model?: string, signal?: AbortSignal): Promise<EmbedLocalResponse> {
   try {
-    await ensureOffscreen();
+    await waitForOffscreen(ensureOffscreen(), signal);
   } catch (e) {
+    if (signal?.aborted) throw abortReason(signal);
     return { ok: false, error: `Could not start the local embedder: ${String(e)}` };
   }
   const request: EmbedLocalRequest = { target: 'offscreen', type: 'embed_local', texts, model };
-  return sendOffscreen<EmbedLocalResponse>(request);
+  return sendOffscreen<EmbedLocalResponse>(request, signal);
+}
+
+/** Extract named-entity spans on-device with the offscreen transformers.js NER model (graph builder fast tier). */
+export async function nerLocal(texts: string[], model?: string, signal?: AbortSignal): Promise<NerLocalResponse> {
+  try {
+    await waitForOffscreen(ensureOffscreen(), signal);
+  } catch (e) {
+    if (signal?.aborted) throw abortReason(signal);
+    return { ok: false, error: `Could not start the local NER model: ${String(e)}` };
+  }
+  const request: NerLocalRequest = { target: 'offscreen', type: 'ner_local', texts, model };
+  return sendOffscreen<NerLocalResponse>(request, signal);
 }
 
 export async function extractOffice(url: string, maxChars?: number): Promise<ExtractOfficeResponse> {
@@ -161,13 +215,14 @@ export async function extractOffice(url: string, maxChars?: number): Promise<Ext
   return sendOffscreen<ExtractOfficeResponse>(request);
 }
 
-async function repoRequest(req: RepoRequest): Promise<RepoResponse> {
+async function repoRequest(req: RepoRequest, signal?: AbortSignal): Promise<RepoResponse> {
   try {
-    await ensureOffscreen();
+    await waitForOffscreen(ensureOffscreen(), signal);
   } catch (e) {
+    if (signal?.aborted) throw abortReason(signal);
     return { ok: false, error: `Could not start the repository engine: ${String(e)}` };
   }
-  return sendOffscreen<RepoResponse>(req);
+  return sendOffscreen<RepoResponse>(req, signal);
 }
 
 export function repoAdd(
@@ -180,12 +235,33 @@ export function repoAdd(
   return repoRequest({ target: 'offscreen-repo', op: 'add', repo, doc, chunks, vectors, ...opts });
 }
 
+/**
+ * Add multiple documents in one round trip: the offscreen store reads/rewrites
+ * `chunks.json`/`keywordIndex.json`/`meta.json` once for the whole batch
+ * instead of once per document (see repoStore.repoAddBatch). Use this instead
+ * of calling `repoAdd` in a loop whenever more than one document is ready to
+ * store at once (e.g. a folder sync batch).
+ */
+export function repoAddBatch(
+  repo: string,
+  docs: Array<{
+    doc: { name: string; url: string };
+    chunks: string[];
+    vectors: number[][];
+    docExtra?: { path?: string; mtime?: number; size?: number };
+    docId?: string;
+  }>,
+  opts: { embedModel?: string; kind?: RepoKind } = {},
+): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'addBatch', repo, docs, ...opts });
+}
+
 export function repoSearch(
   repo: string,
   queryVector: number[],
   k: number,
   embedModel?: string,
-  opts: { query?: string; hybrid?: boolean; queryVectors?: number[][]; queries?: string[] } = {},
+  opts: { query?: string; hybrid?: boolean; graphAssist?: boolean; queryVectors?: number[][]; queries?: string[]; signal?: AbortSignal } = {},
 ): Promise<RepoResponse> {
   return repoRequest({
     target: 'offscreen-repo',
@@ -198,7 +274,8 @@ export function repoSearch(
     query: opts.query,
     queries: opts.queries,
     hybrid: opts.hybrid,
-  });
+    graphAssist: opts.graphAssist,
+  }, opts.signal);
 }
 
 export function repoList(): Promise<RepoResponse> {
@@ -225,6 +302,14 @@ export function repoImport(repos: ExportedRepo[]): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'import', repos });
 }
 
+export function repoExportOne(repo: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'exportOne', repo });
+}
+
+export function repoImportOne(repoData: ExportedRepo, targetName?: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'importOne', repoData, targetName });
+}
+
 export function notebookGet(repo: string): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'notebookGet', repo });
 }
@@ -241,20 +326,33 @@ export function graphGet(repo: string): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'graphGet', repo });
 }
 
-export function graphSet(repo: string, graph: DocGraph): Promise<RepoResponse> {
-  return repoRequest({ target: 'offscreen-repo', op: 'graphSet', repo, graph });
+/** Same as graphGet, but without the staleness gate -- see repoGraphGetRaw. */
+export function graphGetRaw(repo: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'graphGetRaw', repo });
 }
 
-export function docChunks(repo: string, docId: string): Promise<RepoResponse> {
-  return repoRequest({ target: 'offscreen-repo', op: 'docChunks', repo, docId });
+export function graphSnapshot(repo: string): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'graphSnapshot', repo });
+}
+
+export function graphSet(repo: string, graph: DocGraph, expectedRevision: number): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'graphSet', repo, graph, expectedRevision });
+}
+
+export function docChunks(repo: string, docId: string, signal?: AbortSignal): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'docChunks', repo, docId }, signal);
+}
+
+export function docVectors(repo: string, docId: string, signal?: AbortSignal): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'docVectors', repo, docId }, signal);
 }
 
 export function studioGet(repo: string): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'studioGet', repo });
 }
 
-export function studioSet(repo: string, doc: StudioDoc): Promise<RepoResponse> {
-  return repoRequest({ target: 'offscreen-repo', op: 'studioSet', repo, doc });
+export function studioSet(repo: string, doc: StudioDoc, expectedRevision: number): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'studioSet', repo, doc, expectedRevision });
 }
 
 // ----- Products store (durable outputs from scheduled tasks/triggers) -----
@@ -298,4 +396,3 @@ export function productExport(): Promise<ProductResponse> {
 export function productImport(products: ExportedProduct[]): Promise<ProductResponse> {
   return productRequest({ target: 'offscreen-product', op: 'import', products });
 }
-

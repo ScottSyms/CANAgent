@@ -24,6 +24,7 @@ import type {
   ToolActivity,
 } from './types';
 import type { DocGraph } from './docGraph';
+import type { NerSpan } from './nerAggregate';
 import type { EventTrigger } from './eventTriggers';
 import type { ScheduledTaskRecurrence } from './scheduledTasks';
 import type { Workflow } from './workflows';
@@ -119,6 +120,7 @@ export type BackgroundEvent =
 
 /** One-shot messages handled by chrome.runtime.onMessage. */
 export type RuntimeRequest =
+  | { type: 'stop_task' }
   | { type: 'test_connection'; settings: Settings }
   | { type: 'repo_list' }
   | { type: 'job_control'; action: 'pause' | 'resume' | 'cancel' | 'delete'; id: string }
@@ -127,6 +129,8 @@ export type RuntimeRequest =
   | { type: 'repo_doc_delete'; repo: string; docId: string }
   | { type: 'repo_export' }
   | { type: 'repo_import'; repos: ExportedRepo[] }
+  | { type: 'repo_export_one'; repo: string }
+  | { type: 'repo_import_one'; repoData: ExportedRepo; targetName?: string }
   | { type: 'add_files_to_repo'; repo: string; files: UploadFile[]; kind?: RepoKind }
   // Notebook overview (NotebookLM-style): read the cached overview (+ staleness),
   // or (re)generate and persist it from the repo's documents.
@@ -135,10 +139,15 @@ export type RuntimeRequest =
   // Document knowledge graph: read the extracted graph (+ progress), or build/
   // resume/rebuild it from the repo's documents.
   | { type: 'notebook_graph_get'; repo: string }
-  | { type: 'notebook_graph_build'; repo: string; rebuild?: boolean }
+  | { type: 'notebook_graph_build'; repo: string; rebuild?: boolean; mode?: 'quick' | 'full' | 'instant' }
+  | { type: 'notebook_graph_cancel'; repo: string }
   // Resolve a graph node/edge's evidence sentence ids to full citations (source
   // doc + exact sentence text) for the graph UI's evidence panel.
   | { type: 'notebook_graph_evidence'; repo: string; sentenceIds: string[] }
+  // The exact sentence-tagged text of every extraction window for one document —
+  // i.e. what buildRepoGraph actually sent the model — for the graph UI's
+  // "view extracted text" diagnostic on a document (esp. a failed one).
+  | { type: 'notebook_doc_windows'; repo: string; docId: string }
   // Studio: read persisted outputs, or generate one (briefing/faq/study_guide).
   | { type: 'notebook_studio_get'; repo: string }
   | { type: 'notebook_studio_generate'; repo: string; kind: StudioKind }
@@ -259,7 +268,7 @@ export interface RepoInfo {
   chunks: number;
   /** `'folder'` for a locally-indexed directory, else page/tab captures. */
   kind?: RepoKind;
-  /** Embedder the vectors were built with (e.g. `local:Xenova/all-MiniLM-L6-v2`). */
+  /** Embedder the vectors were built with (e.g. `local:all-MiniLM-L6-v2-litert`). */
   embedModel?: string;
 }
 
@@ -293,8 +302,15 @@ export interface ExtractPdfResponse {
   text?: string;
   pageCount?: number;
   truncated?: boolean;
-  /** Full extracted length before any maxChars slice. */
+  /**
+   * Extracted length before any maxChars slice. Exact only when
+   * `charCountExact` is true — with a small `maxChars`, extraction stops
+   * early once past the limit, so this is a lower bound, not the document's
+   * true total.
+   */
   charCount?: number;
+  /** False when `charCount` is a lower bound (extraction stopped early at maxChars), not the document's true total. */
+  charCountExact?: boolean;
   error?: string;
 }
 
@@ -309,10 +325,18 @@ export interface ExtractOfficeRequest {
 export interface ExtractOfficeResponse {
   ok: boolean;
   text?: string;
-  format?: 'docx' | 'pptx' | 'xlsx';
+  /** anydoc's detected format (see src/offscreen/anydocParse.ts) — every format it supports except 'pdf', which has its own message type. */
+  format?: 'doc' | 'docx' | 'odt' | 'ppt' | 'pptx' | 'rtf' | 'epub' | 'xlsx' | 'ods' | 'odp' | 'csv';
   truncated?: boolean;
-  /** Full extracted length before any maxChars slice. */
+  /**
+   * Extracted length before any maxChars slice. Exact only when
+   * `charCountExact` is true — with a small `maxChars`, extraction stops
+   * early once past the limit, so this is a lower bound, not the document's
+   * true total.
+   */
   charCount?: number;
+  /** False when `charCount` is a lower bound (extraction stopped early at maxChars), not the document's true total. */
+  charCountExact?: boolean;
   error?: string;
 }
 
@@ -334,6 +358,29 @@ export interface EmbedLocalResponse {
   /** One vector per input text (row-aligned). */
   vectors?: number[][];
   /** The model id actually used (for the repo model-lock stamp). */
+  model?: string;
+  error?: string;
+}
+
+/**
+ * Extract named-entity spans on-device with the offscreen document's
+ * transformers.js token-classification model — the free, on-device backbone
+ * of the "Quick" graph build (no LLM calls; src/background/graphExtract.ts's
+ * runNerBackbone).
+ */
+export interface NerLocalRequest {
+  target: 'offscreen';
+  type: 'ner_local';
+  texts: string[];
+  /** transformers.js model id; absent = the offscreen default. */
+  model?: string;
+}
+
+export interface NerLocalResponse {
+  ok: boolean;
+  /** One span array per input text (row-aligned). */
+  spans?: NerSpan[][];
+  /** The model id actually used. */
   model?: string;
   error?: string;
 }
@@ -372,12 +419,15 @@ export interface GeneratePresentationRequest {
 }
 
 /** Requests to the offscreen document's OPFS RAG store. */
-/** A single repository serialized for backup (vectors base64-encoded). */
+/** A single repository serialized for backup or single-repo export (vectors base64-encoded). */
 export interface ExportedRepo {
   name: string;
   meta: unknown;
   chunks: unknown;
   vectorsB64: string;
+  notebook?: unknown;
+  graph?: unknown;
+  studio?: unknown;
 }
 
 export type RepoRequest =
@@ -396,6 +446,20 @@ export type RepoRequest =
     }
   | {
       target: 'offscreen-repo';
+      op: 'addBatch';
+      repo: string;
+      docs: Array<{
+        doc: { name: string; url: string };
+        chunks: string[];
+        vectors: number[][];
+        docExtra?: { path?: string; mtime?: number; size?: number };
+        docId?: string;
+      }>;
+      embedModel?: string;
+      kind?: RepoKind;
+    }
+  | {
+      target: 'offscreen-repo';
       op: 'search';
       repo: string;
       queryVector: number[];
@@ -408,6 +472,8 @@ export type RepoRequest =
       queries?: string[];
       /** Fuse semantic + keyword (RRF). When false/absent, pure semantic. */
       hybrid?: boolean;
+      /** Fuse fresh graph-derived chunk rankings. Default true when hybrid search runs. */
+      graphAssist?: boolean;
     }
   | { target: 'offscreen-repo'; op: 'list' }
   | { target: 'offscreen-repo'; op: 'delete'; repo: string }
@@ -415,6 +481,8 @@ export type RepoRequest =
   | { target: 'offscreen-repo'; op: 'deleteDoc'; repo: string; docId: string }
   | { target: 'offscreen-repo'; op: 'export' }
   | { target: 'offscreen-repo'; op: 'import'; repos: ExportedRepo[] }
+  | { target: 'offscreen-repo'; op: 'exportOne'; repo: string }
+  | { target: 'offscreen-repo'; op: 'importOne'; repoData: ExportedRepo; targetName?: string }
   // Notebook overview (NotebookLM-style): cached per-repo synthesized view, plus a
   // strided chunk sample the background generator synthesizes it from.
   | { target: 'offscreen-repo'; op: 'notebookGet'; repo: string }
@@ -422,12 +490,21 @@ export type RepoRequest =
   | { target: 'offscreen-repo'; op: 'notebookSample'; repo: string; maxChunks?: number }
   // Per-notebook document knowledge graph: read/write the extracted graph, and
   // fetch one doc's sentence-tagged chunks for extraction.
+  | { target: 'offscreen-repo'; op: 'graphSnapshot'; repo: string }
   | { target: 'offscreen-repo'; op: 'graphGet'; repo: string }
-  | { target: 'offscreen-repo'; op: 'graphSet'; repo: string; graph: DocGraph }
+  // Same as 'graphGet' but without the staleness gate -- buildRepoGraph uses
+  // this to resume incremental progress on top of the actual stored graph,
+  // even when it's behind the repo's current corpusRevision.
+  | { target: 'offscreen-repo'; op: 'graphGetRaw'; repo: string }
+  | { target: 'offscreen-repo'; op: 'graphSet'; repo: string; graph: DocGraph; expectedRevision: number }
   | { target: 'offscreen-repo'; op: 'docChunks'; repo: string; docId: string }
+  // One document's already-computed embedding vectors (from ingest) plus
+  // dequantization params — reused by the embedding-cluster "Instant" graph
+  // tier so it needs zero new embedding calls.
+  | { target: 'offscreen-repo'; op: 'docVectors'; repo: string; docId: string }
   // Notebook studio outputs (briefing / FAQ / study guide), persisted per repo.
   | { target: 'offscreen-repo'; op: 'studioGet'; repo: string }
-  | { target: 'offscreen-repo'; op: 'studioSet'; repo: string; doc: StudioDoc };
+  | { target: 'offscreen-repo'; op: 'studioSet'; repo: string; doc: StudioDoc; expectedRevision: number };
 
 export interface RepoResponse {
   ok: boolean;

@@ -26,4 +26,14 @@ describe('citation chip rendering over real markdown', () => {
     expect(chips).not.toContain('zzz999');
     expect(chips).not.toContain('[[');
   });
+
+  it('renders grouped references after marked and DOMPurify', () => {
+    const html = render('A claim [[doc-1:c0:s0#aaa111], [doc-1:c0:s1#bbb222]].');
+    const chips = injectCitationChips(html, new Map([
+      ['doc-1:c0:s0#aaa111', 1],
+      ['doc-1:c0:s1#bbb222', 2],
+    ]));
+    expect(chips.match(/citation-chip/g)).toHaveLength(2);
+    expect(chips).not.toContain('doc-1:c0:s0#aaa111],');
+  });
 });
