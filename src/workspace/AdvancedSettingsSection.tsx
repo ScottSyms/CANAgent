@@ -11,7 +11,7 @@
 // revert whatever another section saved after this one mounted.
 
 import { useEffect, useState } from 'preact/hooks';
-import type { Settings } from '../shared/types';
+import { DEFAULT_LOCAL_EMBED_MODEL, type Settings } from '../shared/types';
 import { useT } from '../sidebar/i18n';
 import { Group, Toggle } from './SettingsControls';
 
@@ -180,13 +180,14 @@ export function AdvancedSettingsSection() {
             <span>{t('settings.embeddingModel')}</span>
             <input
               type="text"
-              placeholder={settings.embedder === 'external' ? 'text-embedding-3-small' : 'Xenova/all-MiniLM-L6-v2'}
-              value={settings.embedder === 'external' ? (settings.embeddingModel ?? '') : (settings.localEmbedModel ?? '')}
-              onInput={(e) =>
+              disabled={settings.embedder !== 'external'}
+              placeholder={settings.embedder === 'external' ? 'text-embedding-3-small' : DEFAULT_LOCAL_EMBED_MODEL}
+              value={
                 settings.embedder === 'external'
-                  ? update({ embeddingModel: (e.target as HTMLInputElement).value })
-                  : update({ localEmbedModel: (e.target as HTMLInputElement).value })
+                  ? (settings.embeddingModel ?? '')
+                  : (settings.localEmbedModel ?? DEFAULT_LOCAL_EMBED_MODEL)
               }
+              onInput={(e) => update({ embeddingModel: (e.target as HTMLInputElement).value })}
             />
           </label>
           <label class="field">

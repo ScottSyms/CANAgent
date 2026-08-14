@@ -3,7 +3,7 @@ import { embedLocal } from './offscreenClient';
 import { getAdapter } from './adapters';
 import { apiVersion, authHeaders, buildUrl, LLM_TIMEOUT_MS, requestWithRetry, resolve, type RetryOpts } from './llmNetwork';
 import { LlmError } from './llmTypes';
-import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ToolDefinition } from './llmTypes';
+import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ResponseFormatSpec, ToolDefinition } from './llmTypes';
 
 // =============================================================================
 // Multi-protocol network adapter — the only module that talks to a model
@@ -82,6 +82,11 @@ export function resolveModelForRole(settings: Settings, role: ModelRole): Settin
     apiVersion: profile.apiVersion,
     temperature: profile.temperature ?? settings.temperature,
     maxTokens: profile.maxTokens ?? settings.maxTokens,
+    graphWindowChars: profile.graphWindowChars ?? settings.graphWindowChars,
+    graphExtractionStrategy: profile.graphExtractionStrategy ?? settings.graphExtractionStrategy,
+    graphContextBefore: profile.graphContextBefore ?? settings.graphContextBefore,
+    graphContextAfter: profile.graphContextAfter ?? settings.graphContextAfter,
+    graphGleaningEnabled: profile.graphGleaningEnabled ?? settings.graphGleaningEnabled,
   };
 }
 
@@ -199,6 +204,17 @@ export async function transcribe(settings: Settings, audioDataUrl: string, signa
  * lets the runtime abort an in-flight request on stop/pause. An `AbortError`/
  * `TimeoutError` is rethrown as-is so the loop can distinguish cancellation
  * from a genuine endpoint failure (which becomes an `LlmError`).
+ *
+ * `responseFormat`, when given, asks the endpoint to guarantee its response
+ * matches a JSON schema at the token level (see ResponseFormatSpec in
+ * llmTypes.ts) — supported by Ollama, llama.cpp server, LM Studio, OpenAI,
+ * and Gemini; the Anthropic adapter ignores it (no native equivalent). An
+ * endpoint that doesn't recognize the field either ignores it silently
+ * (today's prompt-based JSON instructions and the caller's own
+ * truncated/unparseable-response recovery still apply unchanged) or rejects
+ * the request outright — the latter is handled below by retrying once with
+ * the field omitted, since a schema-supporting endpoint should never 4xx on
+ * a well-formed schema call.
  */
 export async function complete(
   settings: Settings,
@@ -206,14 +222,20 @@ export async function complete(
   tools?: ToolDefinition[],
   signal?: AbortSignal,
   onRetry?: RetryOpts['onRetry'],
+  responseFormat?: ResponseFormatSpec,
 ): Promise<LlmResponseMessage> {
   const adapter = getAdapter(settings.protocol);
-  const { url, headers, body } = adapter.buildRequest(settings, messages, tools);
+  let currentResponseFormat = responseFormat;
+  let triedWithoutResponseFormat = false;
 
   // OpenRouter and other compatible gateways can report transient provider
   // failures inside an HTTP-200 response. Retry one such parsed failure; no
-  // tool has executed yet, so replaying this completion is safe.
+  // tool has executed yet, so replaying this completion is safe. The same
+  // budget also covers the (mutually exclusive) responseFormat-rejected
+  // fallback below — a genuinely flaky endpoint that ALSO doesn't support
+  // responseFormat is a rare enough double-failure not worth a second budget.
   for (let parsedAttempt = 0; parsedAttempt < 2; parsedAttempt++) {
+    const { url, headers, body } = adapter.buildRequest(settings, messages, tools, currentResponseFormat);
     let response: Response;
     try {
       response = await requestWithRetry(
@@ -237,6 +259,11 @@ export async function complete(
     }
 
     if (!response.ok) {
+      if (currentResponseFormat && !triedWithoutResponseFormat && response.status >= 400 && response.status < 500) {
+        triedWithoutResponseFormat = true;
+        currentResponseFormat = undefined;
+        continue;
+      }
       const text = await response.text().catch(() => '');
       const isHtml = response.headers.get('Content-Type')?.includes('text/html') || /^\s*<!doctype html/i.test(text);
       const detail = isHtml ? 'The endpoint returned an HTML page instead of a model API response.' : text.slice(0, 500);

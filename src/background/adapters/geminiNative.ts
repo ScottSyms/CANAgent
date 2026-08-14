@@ -1,6 +1,6 @@
 import type { Settings } from '../../shared/types';
 import { resolve } from '../llmNetwork';
-import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ToolDefinition } from '../llmTypes';
+import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ResponseFormatSpec, ToolDefinition } from '../llmTypes';
 import { LlmError } from '../llmTypes';
 import { toGeminiFunctionDeclarations } from './toolSchema';
 import type { AdapterRequest, ProtocolAdapter } from './types';
@@ -111,7 +111,7 @@ function buildContents(messages: LlmMessage[]): { systemInstruction: GeminiConte
 }
 
 export const geminiNativeAdapter: ProtocolAdapter = {
-  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[]): AdapterRequest {
+  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[], responseFormat?: ResponseFormatSpec): AdapterRequest {
     const { systemInstruction, contents } = buildContents(messages);
     const body: Record<string, unknown> = { contents };
     if (systemInstruction) body.systemInstruction = systemInstruction;
@@ -119,6 +119,10 @@ export const geminiNativeAdapter: ProtocolAdapter = {
     const generationConfig: Record<string, unknown> = {};
     if (settings.temperature !== undefined) generationConfig.temperature = settings.temperature;
     if (settings.maxTokens !== undefined) generationConfig.maxOutputTokens = settings.maxTokens;
+    if (responseFormat) {
+      generationConfig.responseMimeType = 'application/json';
+      generationConfig.responseSchema = responseFormat.schema;
+    }
     if (Object.keys(generationConfig).length > 0) body.generationConfig = generationConfig;
 
     const { base, key } = resolve(settings, 'chat');

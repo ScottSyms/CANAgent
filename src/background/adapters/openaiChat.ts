@@ -1,6 +1,6 @@
 import type { Settings } from '../../shared/types';
 import { apiVersion, authHeaders, buildUrl, resolve } from '../llmNetwork';
-import type { LlmMessage, LlmResponseMessage, ToolDefinition } from '../llmTypes';
+import type { LlmMessage, LlmResponseMessage, ResponseFormatSpec, ToolDefinition } from '../llmTypes';
 import { LlmError } from '../llmTypes';
 import type { AdapterRequest, ProtocolAdapter } from './types';
 
@@ -64,7 +64,7 @@ function providerError(error: CompatibleError, context: ResponseContext): LlmErr
 // =============================================================================
 
 export const openaiChatAdapter: ProtocolAdapter = {
-  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[]): AdapterRequest {
+  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[], responseFormat?: ResponseFormatSpec): AdapterRequest {
     const body: Record<string, unknown> = {
       model: settings.model,
       messages,
@@ -72,6 +72,15 @@ export const openaiChatAdapter: ProtocolAdapter = {
     if (tools && tools.length > 0) body.tools = tools;
     if (settings.temperature !== undefined) body.temperature = settings.temperature;
     if (settings.maxTokens !== undefined) body.max_tokens = settings.maxTokens;
+    // The shape Ollama's OpenAI-compat layer, llama.cpp server, vLLM, LM
+    // Studio, and OpenAI itself have converged on. An endpoint that doesn't
+    // recognize this field either ignores it (today's prompt-based JSON
+    // instructions and looksTruncated/extractWindowAdaptive recovery still
+    // apply unchanged) or 4xxs — see complete()'s fallback-without-schema
+    // retry in llmProvider.ts.
+    if (responseFormat) {
+      body.response_format = { type: 'json_schema', json_schema: { name: responseFormat.name, strict: true, schema: responseFormat.schema } };
+    }
 
     const { base, key } = resolve(settings, 'chat');
     const version = apiVersion(settings);
@@ -107,6 +116,11 @@ export const openaiChatAdapter: ProtocolAdapter = {
       throw new LlmError(
         `Model reached its output or context limit (finish reason: ${reason}). ` +
           'Increase Max tokens or reduce the conversation context and retry.' + responseContext(data),
+        // Carry whatever content the model did produce — most callers have no
+        // use for a truncated reply and should keep treating this as a hard
+        // failure, but a caller with its own truncation-recovery logic (see
+        // LlmError's content field) can still use it instead of losing it.
+        { content: message.content },
       );
     }
     if (finish === 'content_filter') {

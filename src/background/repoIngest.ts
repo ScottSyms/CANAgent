@@ -182,6 +182,34 @@ export async function ingestFile(
 }
 
 /**
+ * Concurrency cap for per-file extract+embed work in `ingestFilesBatch`. High
+ * enough to overlap PDF/Office extraction (CPU/worker-bound) with embedding
+ * (WASM/GPU-bound) across files; low enough that a folder of hundreds of large
+ * docs doesn't hold that many chunk/vector arrays in memory at once or flood
+ * the single embedding pipeline with concurrent large-document requests.
+ */
+const FILE_INGEST_CONCURRENCY = 4;
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight at once, as a rolling
+ * pool — each of `limit` workers pulls the next unclaimed item as soon as it
+ * finishes its current one, rather than waiting for a whole fixed-size batch
+ * to settle before starting the next (which would idle freed slots behind a
+ * single slow item). Callers write their own results (e.g. into an outer
+ * array by index) from within `fn`, so this doesn't collect return values.
+ */
+async function runWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < items.length) {
+      const item = items[next++];
+      await fn(item);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+/**
  * Ingest several uploaded files into a repository with a single store write:
  * each file is extracted + chunked + embedded individually (unavoidable —
  * different text, different embedding calls), but instead of calling
@@ -189,6 +217,11 @@ export async function ingestFile(
  * rewrites over a folder sync, see repoStore.repoAddBatch), every successfully
  * prepared file is stored in one `repoAddBatch` call. Returns one `IngestResult`
  * per input file, in the same order.
+ *
+ * Extraction + embedding for each file runs concurrently (capped at
+ * `FILE_INGEST_CONCURRENCY`) instead of one file at a time, since neither step
+ * depends on another file's result — only the final `repoAddBatch` write needs
+ * to wait for all of them.
  */
 export async function ingestFilesBatch(
   settings: Settings,
@@ -199,27 +232,30 @@ export async function ingestFilesBatch(
   const results = new Array<IngestResult>(files.length);
   const batchEntries: Array<{ index: number; doc: { name: string; url: string }; chunks: string[]; vectors: number[][]; docExtra: { path?: string; mtime?: number; size?: number } }> = [];
 
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    const extracted = await extractFileText(file);
-    if (!extracted.ok) {
-      results[i] = extracted;
-      continue;
-    }
-    const prepared = await prepareTextDoc(settings, extracted.text);
-    if (!prepared.ok) {
-      results[i] = prepared;
-      continue;
-    }
-    const path = file.path;
-    batchEntries.push({
-      index: i,
-      doc: { name: path || file.name, url: `file:///${path || file.name}` },
-      chunks: prepared.chunks,
-      vectors: prepared.vectors,
-      docExtra: { path, mtime: file.mtime, size: file.size },
-    });
-  }
+  await runWithConcurrency(
+    files.map((file, index) => ({ file, index })),
+    FILE_INGEST_CONCURRENCY,
+    async ({ file, index }) => {
+      const extracted = await extractFileText(file);
+      if (!extracted.ok) {
+        results[index] = extracted;
+        return;
+      }
+      const prepared = await prepareTextDoc(settings, extracted.text);
+      if (!prepared.ok) {
+        results[index] = prepared;
+        return;
+      }
+      const path = file.path;
+      batchEntries.push({
+        index,
+        doc: { name: path || file.name, url: `file:///${path || file.name}` },
+        chunks: prepared.chunks,
+        vectors: prepared.vectors,
+        docExtra: { path, mtime: file.mtime, size: file.size },
+      });
+    },
+  );
 
   if (batchEntries.length > 0) {
     const res = await repoAddBatch(

@@ -24,6 +24,7 @@ import type {
   ToolActivity,
 } from './types';
 import type { DocGraph } from './docGraph';
+import type { NerSpan } from './nerAggregate';
 import type { EventTrigger } from './eventTriggers';
 import type { ScheduledTaskRecurrence } from './scheduledTasks';
 import type { Workflow } from './workflows';
@@ -138,7 +139,7 @@ export type RuntimeRequest =
   // Document knowledge graph: read the extracted graph (+ progress), or build/
   // resume/rebuild it from the repo's documents.
   | { type: 'notebook_graph_get'; repo: string }
-  | { type: 'notebook_graph_build'; repo: string; rebuild?: boolean; mode?: 'quick' | 'full' }
+  | { type: 'notebook_graph_build'; repo: string; rebuild?: boolean; mode?: 'quick' | 'full' | 'instant' }
   | { type: 'notebook_graph_cancel'; repo: string }
   // Resolve a graph node/edge's evidence sentence ids to full citations (source
   // doc + exact sentence text) for the graph UI's evidence panel.
@@ -267,7 +268,7 @@ export interface RepoInfo {
   chunks: number;
   /** `'folder'` for a locally-indexed directory, else page/tab captures. */
   kind?: RepoKind;
-  /** Embedder the vectors were built with (e.g. `local:Xenova/all-MiniLM-L6-v2`). */
+  /** Embedder the vectors were built with (e.g. `local:all-MiniLM-L6-v2-litert`). */
   embedModel?: string;
 }
 
@@ -324,7 +325,8 @@ export interface ExtractOfficeRequest {
 export interface ExtractOfficeResponse {
   ok: boolean;
   text?: string;
-  format?: 'docx' | 'pptx' | 'xlsx';
+  /** anydoc's detected format (see src/offscreen/anydocParse.ts) — every format it supports except 'pdf', which has its own message type. */
+  format?: 'doc' | 'docx' | 'odt' | 'ppt' | 'pptx' | 'rtf' | 'epub' | 'xlsx' | 'ods' | 'odp' | 'csv';
   truncated?: boolean;
   /**
    * Extracted length before any maxChars slice. Exact only when
@@ -356,6 +358,29 @@ export interface EmbedLocalResponse {
   /** One vector per input text (row-aligned). */
   vectors?: number[][];
   /** The model id actually used (for the repo model-lock stamp). */
+  model?: string;
+  error?: string;
+}
+
+/**
+ * Extract named-entity spans on-device with the offscreen document's
+ * transformers.js token-classification model — the free, on-device backbone
+ * of the "Quick" graph build (no LLM calls; src/background/graphExtract.ts's
+ * runNerBackbone).
+ */
+export interface NerLocalRequest {
+  target: 'offscreen';
+  type: 'ner_local';
+  texts: string[];
+  /** transformers.js model id; absent = the offscreen default. */
+  model?: string;
+}
+
+export interface NerLocalResponse {
+  ok: boolean;
+  /** One span array per input text (row-aligned). */
+  spans?: NerSpan[][];
+  /** The model id actually used. */
   model?: string;
   error?: string;
 }
@@ -473,6 +498,10 @@ export type RepoRequest =
   | { target: 'offscreen-repo'; op: 'graphGetRaw'; repo: string }
   | { target: 'offscreen-repo'; op: 'graphSet'; repo: string; graph: DocGraph; expectedRevision: number }
   | { target: 'offscreen-repo'; op: 'docChunks'; repo: string; docId: string }
+  // One document's already-computed embedding vectors (from ingest) plus
+  // dequantization params — reused by the embedding-cluster "Instant" graph
+  // tier so it needs zero new embedding calls.
+  | { target: 'offscreen-repo'; op: 'docVectors'; repo: string; docId: string }
   // Notebook studio outputs (briefing / FAQ / study guide), persisted per repo.
   | { target: 'offscreen-repo'; op: 'studioGet'; repo: string }
   | { target: 'offscreen-repo'; op: 'studioSet'; repo: string; doc: StudioDoc; expectedRevision: number };

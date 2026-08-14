@@ -16,3 +16,4 @@ playwright/.cache/
 # Unrelated local files
 atlassian-mcp-skill.json
 atlassian-mcp-skill.md
+.opencode/

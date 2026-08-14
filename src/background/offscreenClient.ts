@@ -18,6 +18,8 @@ import type {
   GenerateDocumentResponse,
   GeneratePresentationRequest,
   SlideSpec,
+  NerLocalRequest,
+  NerLocalResponse,
   ProductMeta,
   ProductRequest,
   ProductResponse,
@@ -191,6 +193,18 @@ export async function embedLocal(texts: string[], model?: string, signal?: Abort
   return sendOffscreen<EmbedLocalResponse>(request, signal);
 }
 
+/** Extract named-entity spans on-device with the offscreen transformers.js NER model (graph builder fast tier). */
+export async function nerLocal(texts: string[], model?: string, signal?: AbortSignal): Promise<NerLocalResponse> {
+  try {
+    await waitForOffscreen(ensureOffscreen(), signal);
+  } catch (e) {
+    if (signal?.aborted) throw abortReason(signal);
+    return { ok: false, error: `Could not start the local NER model: ${String(e)}` };
+  }
+  const request: NerLocalRequest = { target: 'offscreen', type: 'ner_local', texts, model };
+  return sendOffscreen<NerLocalResponse>(request, signal);
+}
+
 export async function extractOffice(url: string, maxChars?: number): Promise<ExtractOfficeResponse> {
   try {
     await ensureOffscreen();
@@ -327,6 +341,10 @@ export function graphSet(repo: string, graph: DocGraph, expectedRevision: number
 
 export function docChunks(repo: string, docId: string, signal?: AbortSignal): Promise<RepoResponse> {
   return repoRequest({ target: 'offscreen-repo', op: 'docChunks', repo, docId }, signal);
+}
+
+export function docVectors(repo: string, docId: string, signal?: AbortSignal): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'docVectors', repo, docId }, signal);
 }
 
 export function studioGet(repo: string): Promise<RepoResponse> {

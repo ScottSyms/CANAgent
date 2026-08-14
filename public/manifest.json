@@ -70,7 +70,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["models/*", "ort/*"],
+      "resources": ["models/*", "litert/*"],
       "matches": ["<all_urls>"]
     }
   ]

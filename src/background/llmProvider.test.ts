@@ -281,6 +281,144 @@ describe('complete (protocol dispatch)', () => {
     await expect(complete(base, [{ role: 'user', content: 'hi' }])).rejects.toThrow('Increase Max tokens');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it('still throws on finish_reason:"length" when the model produced content, but carries that content on the error instead of discarding it', async () => {
+    // Real-world case: a small local model cuts off mid-JSON. The main
+    // chat/agent loop has no use for a truncated reply and should keep
+    // treating this as a hard failure -- but a caller with its own
+    // truncation-recovery logic (graphExtract.ts's extractOneDoc) needs the
+    // partial content LlmError.content carries, not just the error message.
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ finish_reason: 'length', message: { role: 'assistant', content: '{"entities":[{"label":"X"' } }],
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    let caught: unknown;
+    try {
+      await complete(base, [{ role: 'user', content: 'hi' }]);
+      expect.unreachable();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toMatchObject({ name: 'LlmError' });
+    expect((caught as { content?: string }).content).toBe('{"entities":[{"label":"X"');
+    expect(fetchMock).toHaveBeenCalledTimes(1); // not retried -- this is a hard failure for ordinary callers
+  });
+});
+
+describe('complete (responseFormat / constrained JSON output)', () => {
+  const schema = { name: 'test_schema', schema: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'] } };
+
+  it('sets response_format on the chat-completions body when responseFormat is passed', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }), { status: 200 });
+      }),
+    );
+    await complete(base, [{ role: 'user', content: 'hi' }], undefined, undefined, undefined, schema);
+    expect(requestBody?.response_format).toEqual({
+      type: 'json_schema',
+      json_schema: { name: 'test_schema', strict: true, schema: schema.schema },
+    });
+  });
+
+  it('omits response_format entirely when no responseFormat is passed', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }), { status: 200 });
+      }),
+    );
+    await complete(base, [{ role: 'user', content: 'hi' }]);
+    expect(requestBody?.response_format).toBeUndefined();
+  });
+
+  it('sets text.format on the responses-protocol body (different key/shape than chat-completions)', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }] }), { status: 200 });
+      }),
+    );
+    const responsesSettings: Settings = { ...base, protocol: 'responses' };
+    await complete(responsesSettings, [{ role: 'user', content: 'hi' }], undefined, undefined, undefined, schema);
+    expect(requestBody?.text).toEqual({
+      format: { type: 'json_schema', name: 'test_schema', schema: schema.schema, strict: true },
+    });
+  });
+
+  it('sets generationConfig.responseSchema/responseMimeType on the gemini-native body', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }), { status: 200 });
+      }),
+    );
+    const geminiSettings: Settings = { ...base, protocol: 'gemini-native' };
+    await complete(geminiSettings, [{ role: 'user', content: 'hi' }], undefined, undefined, undefined, schema);
+    const generationConfig = requestBody?.generationConfig as Record<string, unknown>;
+    expect(generationConfig.responseMimeType).toBe('application/json');
+    expect(generationConfig.responseSchema).toEqual(schema.schema);
+  });
+
+  it('leaves the anthropic-messages body untouched (no native constrained-decoding field)', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ content: [{ type: 'text', text: 'ok' }] }), { status: 200 });
+      }),
+    );
+    const anthropicSettings: Settings = { ...base, protocol: 'anthropic-messages' };
+    await complete(anthropicSettings, [{ role: 'user', content: 'hi' }], undefined, undefined, undefined, schema);
+    expect(Object.keys(requestBody ?? {})).not.toContain('response_format');
+    expect(Object.keys(requestBody ?? {})).not.toContain('text');
+  });
+
+  it('falls back to a request without responseFormat after a 4xx, and succeeds', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      if (bodies.length === 1) return new Response('{"error":"unknown field response_format"}', { status: 400 });
+      return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'recovered without schema' } }] }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const message = await complete(base, [{ role: 'user', content: 'hi' }], undefined, undefined, undefined, schema);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(bodies[0].response_format).toBeDefined();
+    expect(bodies[1].response_format).toBeUndefined();
+    expect(message).toEqual({ role: 'assistant', content: 'recovered without schema' });
+  });
+
+  it('does not fall back (and just surfaces the error) on a 4xx when no responseFormat was requested', async () => {
+    const fetchMock = vi.fn(async () => new Response('bad request', { status: 400 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(complete(base, [{ role: 'user', content: 'hi' }])).rejects.toThrow('returned 400');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fall back on a 5xx even with responseFormat set (that failure class is unrelated to schema support)', async () => {
+    const fetchMock = vi.fn(async () => new Response('server error', { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      complete({ ...base, retryOnRateLimit: false }, [{ role: 'user', content: 'hi' }], undefined, undefined, undefined, schema),
+    ).rejects.toThrow('returned 500');
+  });
 });
 
 describe('resolveModelForRole', () => {
@@ -317,6 +455,68 @@ describe('resolveModelForRole', () => {
     const resolved = resolveModelForRole(settings, 'utility');
     expect(resolved.temperature).toBe(0.7);
     expect(resolved.maxTokens).toBe(500);
+  });
+
+  it('resolves graphWindowChars the same way as maxTokens/temperature: profile overrides, falls back to main settings, absent stays absent', () => {
+    const profileOverride: ModelProfile = { ...localProfile, graphWindowChars: 3000 };
+    const withProfileOverride: Settings = {
+      ...base,
+      modelProfiles: [profileOverride],
+      roleProfiles: { knowledgeGraph: 'p1' },
+    };
+    expect(resolveModelForRole(withProfileOverride, 'knowledgeGraph').graphWindowChars).toBe(3000);
+
+    const withMainFallback: Settings = {
+      ...base,
+      graphWindowChars: 4000,
+      modelProfiles: [localProfile], // no graphWindowChars of its own
+      roleProfiles: { knowledgeGraph: 'p1' },
+    };
+    expect(resolveModelForRole(withMainFallback, 'knowledgeGraph').graphWindowChars).toBe(4000);
+
+    const withNeither: Settings = { ...base, modelProfiles: [localProfile], roleProfiles: { knowledgeGraph: 'p1' } };
+    expect(resolveModelForRole(withNeither, 'knowledgeGraph').graphWindowChars).toBeUndefined();
+  });
+
+  it('resolves graphGleaningEnabled the same profile-overrides-main-falls-back way', () => {
+    const profileOverride: ModelProfile = { ...localProfile, graphGleaningEnabled: false };
+    const withProfileOverride: Settings = {
+      ...base,
+      modelProfiles: [profileOverride],
+      roleProfiles: { knowledgeGraph: 'p1' },
+    };
+    expect(resolveModelForRole(withProfileOverride, 'knowledgeGraph').graphGleaningEnabled).toBe(false);
+
+    const withMainFallback: Settings = {
+      ...base,
+      graphGleaningEnabled: false,
+      modelProfiles: [localProfile], // no graphGleaningEnabled of its own
+      roleProfiles: { knowledgeGraph: 'p1' },
+    };
+    expect(resolveModelForRole(withMainFallback, 'knowledgeGraph').graphGleaningEnabled).toBe(false);
+
+    const withNeither: Settings = { ...base, modelProfiles: [localProfile], roleProfiles: { knowledgeGraph: 'p1' } };
+    expect(resolveModelForRole(withNeither, 'knowledgeGraph').graphGleaningEnabled).toBeUndefined();
+  });
+
+  it('resolves graphExtractionStrategy/graphContextBefore/graphContextAfter the same profile-overrides-main-falls-back way', () => {
+    const profileOverride: ModelProfile = {
+      ...localProfile,
+      graphExtractionStrategy: 'sentence',
+      graphContextBefore: 2,
+      graphContextAfter: 0,
+    };
+    const settings: Settings = { ...base, modelProfiles: [profileOverride], roleProfiles: { knowledgeGraph: 'p1' } };
+    const resolved = resolveModelForRole(settings, 'knowledgeGraph');
+    expect(resolved.graphExtractionStrategy).toBe('sentence');
+    expect(resolved.graphContextBefore).toBe(2);
+    expect(resolved.graphContextAfter).toBe(0);
+
+    const withNeither: Settings = { ...base, modelProfiles: [localProfile], roleProfiles: { knowledgeGraph: 'p1' } };
+    const resolvedNeither = resolveModelForRole(withNeither, 'knowledgeGraph');
+    expect(resolvedNeither.graphExtractionStrategy).toBeUndefined();
+    expect(resolvedNeither.graphContextBefore).toBeUndefined();
+    expect(resolvedNeither.graphContextAfter).toBeUndefined();
   });
 
   it('restrictBackgroundToLocal skips a cloud-tagged profile, falling back to main', () => {

@@ -55,6 +55,13 @@ export function quantizeVector(v: number[], scale: number[]): Int8Array {
   return out;
 }
 
+/** Inverse of `quantizeVector`: reconstruct an approximate float vector from a stored int8 row, so an already-computed embedding can be reused (e.g. as a similarity-search query) without re-embedding. */
+export function dequantizeVector(v: Int8Array | ArrayLike<number>, scale: number[]): number[] {
+  const out = new Array(v.length);
+  for (let d = 0; d < v.length; d++) out[d] = (v[d] / QUANT) * (scale[d] || 1);
+  return out;
+}
+
 export interface SearchParams {
   dim: number;
   perDimScale: number[];

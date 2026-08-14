@@ -198,11 +198,24 @@ export interface LessonEntry {
 }
 
 /**
- * Default on-device embedding model (transformers.js): 384-d MiniLM, ~23 MB
- * int8. Declared here (dependency-free) so the service worker can derive the
- * embedder identity without importing the transformers runtime.
+ * Default on-device embedding model (LiteRT.js): 384-d MiniLM, ~23 MB int8,
+ * WebGPU-accelerated with a WASM/XNNPACK fallback. A custom conversion of
+ * sentence-transformers/all-MiniLM-L6-v2 (see
+ * scripts/convert-litert-embed-model/), distinct from the old
+ * transformers.js/ONNX id so existing repos correctly detect the embedder
+ * change and prompt a re-index instead of mixing incompatible vectors.
+ * Declared here (dependency-free) so the service worker can derive the
+ * embedder identity without importing the LiteRT runtime.
  */
-export const DEFAULT_LOCAL_EMBED_MODEL = 'Xenova/all-MiniLM-L6-v2';
+export const DEFAULT_LOCAL_EMBED_MODEL = 'all-MiniLM-L6-v2-litert';
+
+/**
+ * Default on-device NER model (transformers.js token-classification) for the
+ * graph builder's "fast tier" (no LLM calls). Multilingual (10 languages incl.
+ * English and French, PER/ORG/LOC) rather than an English-only model, since
+ * this app's UI itself ships bilingual EN/FR (see src/sidebar/i18n.tsx).
+ */
+export const DEFAULT_LOCAL_NER_MODEL = 'Xenova/bert-base-multilingual-cased-ner-hrl';
 
 /**
  * The feature prompts a user may override (src/shared/promptDefaults.ts). Named
@@ -212,6 +225,9 @@ export const DEFAULT_LOCAL_EMBED_MODEL = 'Xenova/all-MiniLM-L6-v2';
 export type PromptKey =
   | 'notebookOverview'
   | 'graphExtraction'
+  | 'graphExtractionSentence'
+  | 'graphExtractionGleaning'
+  | 'graphRelationTyping'
   | 'communitySummary'
   | 'studioBriefing'
   | 'studioFaq'
@@ -242,6 +258,43 @@ export interface Settings {
   apiVersion?: string;
   temperature?: number;
   maxTokens?: number;
+  /**
+   * Override for the knowledge-graph extractor's per-window input budget
+   * (chars), normally `PER_DOC_BUDGET_CHARS` in graphExtract.ts (6000).
+   * Only meaningful when resolved for the `knowledgeGraph` role — shrink this
+   * for a small/low-context local model so one window's input plus its
+   * requested output together fit inside the model server's context window;
+   * `maxTokens` alone doesn't help if the constraint is the server's total
+   * context rather than the requested output length. Absent = unchanged
+   * (today's default budget).
+   */
+  graphWindowChars?: number;
+  /**
+   * Knowledge-graph extraction strategy. `'window'` (default, absent = this)
+   * groups many sentences into one `graphWindowChars`-sized call, same as
+   * today. `'sentence'` extracts one target sentence per call, with a few
+   * neighboring sentences supplied only as read-only context for resolving
+   * pronouns/references — never as additional extraction targets. Bounds a
+   * small model's per-call reasoning to the smallest possible unit, at the
+   * cost of far more (much smaller/faster) calls per document. See
+   * `graphContextBefore`/`graphContextAfter` for the neighbor-window size.
+   */
+  graphExtractionStrategy?: 'window' | 'sentence';
+  /** Sentence-mode only: how many preceding sentences to include as context. Absent = 1. */
+  graphContextBefore?: number;
+  /** Sentence-mode only: how many following sentences to include as context. Absent = 1. */
+  graphContextAfter?: number;
+  /**
+   * Window-mode only ("gleaning", GraphRAG's technique): after a window's
+   * first successful extraction, send one follow-up "did you miss anything?"
+   * call continuing that same exchange, to recover entities/relations a small
+   * model skipped on its first pass without needing a bigger window. Adds at
+   * most one extra call per window that succeeded outright (never applies to
+   * a window recovered via the truncation-retry split, and never runs after a
+   * failed extraction). Absent = enabled (this is worth the extra call by
+   * default); set `false` to disable for a cost/latency-sensitive setup.
+   */
+  graphGleaningEnabled?: boolean;
   /** Default number of passages a repository search returns (search_repo k). Absent = 6. */
   repoSearchK?: number;
   /**
@@ -391,6 +444,16 @@ export interface ModelProfile {
   apiVersion?: string;
   temperature?: number;
   maxTokens?: number;
+  /** See Settings.graphWindowChars — only meaningful when this profile is assigned to the Knowledge Graph role. */
+  graphWindowChars?: number;
+  /** See Settings.graphExtractionStrategy — only meaningful when this profile is assigned to the Knowledge Graph role. */
+  graphExtractionStrategy?: 'window' | 'sentence';
+  /** See Settings.graphContextBefore. */
+  graphContextBefore?: number;
+  /** See Settings.graphContextAfter. */
+  graphContextAfter?: number;
+  /** See Settings.graphGleaningEnabled. */
+  graphGleaningEnabled?: boolean;
   /**
    * 'local' = a private/on-device-reachable endpoint (e.g. Ollama on
    * localhost or a LAN host); 'cloud' = a hosted third-party service. Purely

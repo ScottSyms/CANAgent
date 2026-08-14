@@ -1,6 +1,6 @@
 import type { Settings } from '../../shared/types';
 import { resolve } from '../llmNetwork';
-import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ToolDefinition } from '../llmTypes';
+import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ResponseFormatSpec, ToolDefinition } from '../llmTypes';
 import { LlmError } from '../llmTypes';
 import { toAnthropicTools } from './toolSchema';
 import type { AdapterRequest, ProtocolAdapter } from './types';
@@ -99,7 +99,12 @@ function buildMessages(messages: LlmMessage[]): { system: string | undefined; me
 }
 
 export const anthropicMessagesAdapter: ProtocolAdapter = {
-  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[]): AdapterRequest {
+  // `responseFormat` is intentionally unused: the Messages API has no native
+  // schema-constrained-decoding field (unlike OpenAI's response_format,
+  // Gemini's responseSchema, or Ollama/llama.cpp's grammar-backed `format`).
+  // This protocol keeps relying on prompt-based JSON instructions plus the
+  // existing looksTruncated/extractWindowAdaptive recovery in graphExtract.ts.
+  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[], _responseFormat?: ResponseFormatSpec): AdapterRequest {
     const { system, messages: anthropicMessages } = buildMessages(messages);
     const body: Record<string, unknown> = {
       model: settings.model,

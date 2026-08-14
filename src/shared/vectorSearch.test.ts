@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeVector, quantizeVector, searchVectors } from './vectorSearch';
+import { dequantizeVector, normalizeVector, quantizeVector, searchVectors } from './vectorSearch';
 
 describe('normalizeVector', () => {
   it('returns a unit vector', () => {
@@ -16,6 +16,26 @@ describe('quantizeVector', () => {
   it('maps to the int8 range using the per-dim scale', () => {
     expect(Array.from(quantizeVector([1, 0], [1, 1]))).toEqual([127, 0]);
     expect(Array.from(quantizeVector([2, -2], [1, 1]))).toEqual([127, -127]); // clamped
+  });
+});
+
+describe('dequantizeVector', () => {
+  it('approximately inverts quantizeVector', () => {
+    const original = normalizeVector([3, -4, 1]);
+    const scale = [1, 1, 1];
+    const q = quantizeVector(original, scale);
+    const back = dequantizeVector(q, scale);
+    for (let i = 0; i < original.length; i++) expect(back[i]).toBeCloseTo(original[i], 1);
+  });
+
+  it('applies the per-dimension scale', () => {
+    const q = new Int8Array([127, -127]);
+    expect(dequantizeVector(q, [2, 0.5])).toEqual([2, -0.5]);
+  });
+
+  it('treats a zero scale entry as 1 (matching quantizeVector\'s guard)', () => {
+    const q = new Int8Array([127]);
+    expect(dequantizeVector(q, [0])).toEqual([1]);
   });
 });
 

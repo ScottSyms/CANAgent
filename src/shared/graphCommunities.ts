@@ -30,34 +30,39 @@ export interface RawCommunity {
 }
 
 /**
- * Partition the graph's nodes into communities with label propagation. Undirected
- * over the edge set; updates asynchronously in a stable node order with a
- * lexicographic tie-break, so the result is deterministic. Communities smaller
- * than `minSize` are dropped (singletons aren't themes) and the largest
- * `maxCommunities` are kept, ordered by size descending.
+ * Partition an arbitrary set of node ids into communities via label
+ * propagation over an undirected edge set. Updates in a stable node order
+ * with a lexicographic tie-break, so the result is deterministic. Communities
+ * smaller than `minSize` are dropped (singletons aren't themes) and the
+ * largest `maxCommunities` are kept, ordered by size descending. Generic over
+ * *any* node-id/edge shape (not tied to `DocGraph`'s `GraphNode`/`GraphEdge`)
+ * so it can also cluster, e.g., a chunk-embedding similarity graph — see
+ * `detectCommunities` below for the `DocGraph`-shaped wrapper, and
+ * `src/shared/chunkClusters.ts` for the other caller.
  */
-export function detectCommunities(
-  graph: DocGraph,
+export function labelPropagate(
+  nodeIds: string[],
+  edges: Array<[string, string]>,
   opts: { minSize?: number; maxCommunities?: number } = {},
 ): RawCommunity[] {
   const minSize = opts.minSize ?? 2;
-  const nodeIds = graph.nodes.map((n) => n.id).sort();
+  const sortedIds = [...nodeIds].sort();
   const adj = new Map<string, Set<string>>();
-  for (const id of nodeIds) adj.set(id, new Set());
-  for (const e of graph.edges) {
-    if (e.from !== e.to && adj.has(e.from) && adj.has(e.to)) {
-      adj.get(e.from)!.add(e.to);
-      adj.get(e.to)!.add(e.from);
+  for (const id of sortedIds) adj.set(id, new Set());
+  for (const [from, to] of edges) {
+    if (from !== to && adj.has(from) && adj.has(to)) {
+      adj.get(from)!.add(to);
+      adj.get(to)!.add(from);
     }
   }
 
   const label = new Map<string, string>();
-  for (const id of nodeIds) label.set(id, id);
+  for (const id of sortedIds) label.set(id, id);
 
   const MAX_ITER = 20;
   for (let iter = 0; iter < MAX_ITER; iter++) {
     let changed = false;
-    for (const id of nodeIds) {
+    for (const id of sortedIds) {
       const neighbors = adj.get(id)!;
       if (neighbors.size === 0) continue;
       const counts = new Map<string, number>();
@@ -83,7 +88,7 @@ export function detectCommunities(
   }
 
   const groups = new Map<string, string[]>();
-  for (const id of nodeIds) {
+  for (const id of sortedIds) {
     const l = label.get(id)!;
     let g = groups.get(l);
     if (!g) groups.set(l, (g = []));
@@ -92,6 +97,19 @@ export function detectCommunities(
   let comms = [...groups.values()].filter((c) => c.length >= minSize).sort((a, b) => b.length - a.length);
   if (opts.maxCommunities) comms = comms.slice(0, opts.maxCommunities);
   return comms.map((ids, i) => ({ id: `com${i}`, nodeIds: ids }));
+}
+
+/**
+ * Partition the graph's nodes into communities with label propagation
+ * (`labelPropagate`), over the graph's own edge set.
+ */
+export function detectCommunities(
+  graph: DocGraph,
+  opts: { minSize?: number; maxCommunities?: number } = {},
+): RawCommunity[] {
+  const nodeIds = graph.nodes.map((n) => n.id);
+  const edges: Array<[string, string]> = graph.edges.map((e) => [e.from, e.to]);
+  return labelPropagate(nodeIds, edges, opts);
 }
 
 const tag = (ids: string[]) => ids.map((id) => `[[${id}]]`).join(' ');
@@ -176,4 +194,56 @@ export function communityNodes(graph: DocGraph, community: RawCommunity): GraphN
 export function communityEdges(graph: DocGraph, community: RawCommunity): GraphEdge[] {
   const members = new Set(community.nodeIds);
   return graph.edges.filter((e) => members.has(e.from) && members.has(e.to));
+}
+
+const MAX_EXTRACTIVE_SUMMARY_CHARS = 600;
+const TOP_MEMBERS = 5;
+
+/**
+ * Deterministic, no-LLM community summary: title from the highest-internal-
+ * degree member labels, summary from concatenating those members' existing
+ * (already model-authored, from extraction) one-line summaries plus their
+ * strongest relation phrases, truncated. Used for incremental "Quick update"
+ * builds so an unaffected community doesn't need a fresh LLM call — reuses
+ * exactly the community data `renderCommunityForModel` assembles for the LLM
+ * path, just formats it without a model call.
+ */
+export function extractiveCommunitySummary(graph: DocGraph, community: RawCommunity): CommunitySummary {
+  const nodes = communityNodes(graph, community);
+  const edges = communityEdges(graph, community);
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+
+  const degree = new Map<string, number>();
+  for (const e of edges) {
+    degree.set(e.from, (degree.get(e.from) ?? 0) + 1);
+    degree.set(e.to, (degree.get(e.to) ?? 0) + 1);
+  }
+
+  const ranked = [...nodes].sort(
+    (a, b) =>
+      (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0) ||
+      b.evidenceSentenceIds.length - a.evidenceSentenceIds.length ||
+      a.label.localeCompare(b.label),
+  );
+  const top = ranked.slice(0, TOP_MEMBERS);
+
+  const title = (top.slice(0, 3).map((n) => n.label).join(', ') || 'Untitled theme').slice(0, 60);
+
+  const relPhrases = [...edges]
+    .sort(
+      (a, b) =>
+        (degree.get(b.from) ?? 0) + (degree.get(b.to) ?? 0) - ((degree.get(a.from) ?? 0) + (degree.get(a.to) ?? 0)),
+    )
+    .slice(0, 3)
+    .map((e) => `${byId.get(e.from)?.label ?? '?'} ${e.relation} ${byId.get(e.to)?.label ?? '?'}`);
+
+  const summaryParts = [...top.map((n) => n.summary).filter(Boolean), ...relPhrases];
+  const summary = (
+    summaryParts.join(' ').trim() ||
+    `A cluster of ${nodes.length} related entities: ${top.map((n) => n.label).join(', ')}.`
+  ).slice(0, MAX_EXTRACTIVE_SUMMARY_CHARS);
+
+  const evidenceSentenceIds = [...new Set(top.flatMap((n) => n.evidenceSentenceIds))].slice(0, 8);
+
+  return { id: community.id, title, summary, nodeIds: community.nodeIds, evidenceSentenceIds, method: 'extractive' };
 }

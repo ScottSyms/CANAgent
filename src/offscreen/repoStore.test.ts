@@ -3,6 +3,7 @@ import {
   repoAdd,
   repoDeleteDoc,
   repoDocChunks,
+  repoDocVectors,
   repoExportOne,
   repoGraphGet,
   repoGraphGetRaw,
@@ -19,6 +20,7 @@ import {
 } from './repoStore';
 import type { NotebookOverview } from '../shared/types';
 import { emptyDocGraph, mergeExtraction } from '../shared/docGraph';
+import { dequantizeVector, normalizeVector } from '../shared/vectorSearch';
 
 // ---- minimal in-memory OPFS fake (only the surface repoStore uses) ----
 
@@ -297,6 +299,34 @@ describe('document graph', () => {
     const stale = await repoSearch('stale', [1, 0], 1, 'local:minilm', { query: 'Project Atlas', hybrid: true });
     expect(stale.results[0].text).toContain('Semantic winner');
     expect(stale.diagnostics.graphStatus).toBe('stale_graph');
+  });
+
+  it('repoDocVectors returns just one document\'s already-computed vectors, correctly sliced from a multi-doc repo', async () => {
+    const { docId: docA } = await repoAdd('r', { name: 'a', url: 'file:///a' }, ['alpha one', 'alpha two'], [vec(8, 1), vec(8, 2)], {
+      embedModel: 'local:minilm',
+    });
+    const { docId: docB } = await repoAdd('r', { name: 'b', url: 'file:///b' }, ['beta one'], [vec(8, 3)]);
+
+    const a = await repoDocVectors('r', docA);
+    const b = await repoDocVectors('r', docB);
+
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    expect(a!.dim).toBe(8);
+    expect(a!.vectors.length).toBe(2 * 8); // 2 chunks for doc A
+    expect(b!.vectors.length).toBe(1 * 8); // 1 chunk for doc B
+
+    // Round-trip: dequantizing doc A's first chunk should approximate the
+    // same normalized vector repoAdd originally quantized and stored.
+    const expected = normalizeVector(vec(8, 1));
+    const actual = dequantizeVector(a!.vectors.subarray(0, 8), a!.perDimScale);
+    for (let i = 0; i < 8; i++) expect(actual[i]).toBeCloseTo(expected[i], 1);
+  });
+
+  it('repoDocVectors returns null for an unknown document or repo', async () => {
+    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
+    expect(await repoDocVectors('r', 'nope')).toBeNull();
+    expect(await repoDocVectors('no-such-repo', 'nope')).toBeNull();
   });
 
   it('increments corpus revisions after an add without deleting the existing graph/Studio outputs', async () => {

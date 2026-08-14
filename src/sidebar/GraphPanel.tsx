@@ -9,12 +9,28 @@ import { DocWindowsView } from './DocWindowsView';
 // communities, GraphRAG "global" sensemaking), and click-through from any entity
 // or theme to the exact source sentences behind it.
 
+// Structurally covers GraphBuildFastProgress/GraphBuildProgress/
+// GraphBuildInstantProgress from src/background/graphExtract.ts — declared
+// locally (not imported) to keep this UI module decoupled from background
+// internals, matching how GetResponse/BuildResponse are already hand-declared
+// here rather than imported.
+interface BuildProgress {
+  docsTotal: number;
+  docsDone: number;
+  currentDoc?: string;
+  nodes?: number;
+  edges?: number;
+  chunksGathered?: number;
+  windowsTotal?: number;
+  windowsDone?: number;
+}
 interface GetResponse {
   ok: boolean;
   graph: DocGraph | null;
   docCount: number;
   docs: Array<{ id: string; name: string }>;
   building: boolean;
+  progress?: BuildProgress;
 }
 interface BuildResponse {
   ok: boolean;
@@ -74,6 +90,7 @@ export function GraphPanel({ repo }: { repo: string }) {
   const [docCount, setDocCount] = useState(0);
   const [docs, setDocs] = useState<Array<{ id: string; name: string }>>([]);
   const [building, setBuilding] = useState(false);
+  const [progress, setProgress] = useState<BuildProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -91,6 +108,7 @@ export function GraphPanel({ repo }: { repo: string }) {
       setDocCount(res?.docCount ?? 0);
       setDocs(res?.docs ?? []);
       setBuilding(!!res?.building);
+      setProgress(res?.building ? res?.progress ?? null : null);
       return res;
     } catch {
       return null;
@@ -105,10 +123,11 @@ export function GraphPanel({ repo }: { repo: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo]);
 
-  const build = async (mode: 'quick' | 'full', rebuild = false) => {
+  const build = async (mode: 'quick' | 'full' | 'instant', rebuild = false) => {
     setError(null);
     setWarnings([]);
     setBuilding(true);
+    setProgress(null);
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(() => void refresh(), 2000) as unknown as number;
     try {
@@ -122,6 +141,7 @@ export function GraphPanel({ repo }: { repo: string }) {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = null;
     setBuilding(false);
+    setProgress(null);
     void refresh();
   };
 
@@ -130,6 +150,7 @@ export function GraphPanel({ repo }: { repo: string }) {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = null;
     setBuilding(false);
+    setProgress(null);
   };
 
   const showEvidence = async (title: string, summary: string, ids: string[], color?: string) => {
@@ -188,11 +209,22 @@ export function GraphPanel({ repo }: { repo: string }) {
             <button class="btn btn-small" onClick={() => void cancelBuild()}>Stop build</button>
           ) : (
             <>
-              <button class="btn btn-small" onClick={() => void build('quick')}>
+              <button
+                class="btn btn-small"
+                onClick={() => void build('quick')}
+                title="On-device NER finds entities and relationships (free, no model calls), then a bounded, fixed-size batch of model calls names each theme and upgrades the most important relationships — call count doesn't grow with document count, so this stays fast even on a large notebook."
+              >
                 {nodeCount > 0 ? 'Quick update' : 'Quick build'}
               </button>
               <button class="btn btn-small" onClick={() => void build('full')} title="Process every document window; resumable but may use many model calls">
                 Full coverage
+              </button>
+              <button
+                class="btn btn-small"
+                onClick={() => void build('instant')}
+                title="Cluster the embeddings already computed for search — no model calls at all, not even NER. Produces topic clusters (not named entities) with keyword labels; edges just mean 'appears in the same document'. No model configuration needed to use this mode."
+              >
+                Instant (topics)
               </button>
             </>
           )}
@@ -212,9 +244,21 @@ export function GraphPanel({ repo }: { repo: string }) {
 
       {building && (
         <p class="settings-note">
-          Extracting… {processed} / {docCount} documents
-          {selectedWindows > 0 ? ` · ${completedWindows}/${selectedWindows} selected windows` : ''}
-          {' · '}{nodeCount} entities, {edgeCount} relationships
+          {progress ? (
+            <>
+              {progress.currentDoc ? `Processing "${progress.currentDoc}"… ` : 'Processing… '}
+              {progress.docsDone} / {progress.docsTotal || docCount} documents
+              {progress.windowsTotal ? ` · ${progress.windowsDone ?? 0}/${progress.windowsTotal} windows` : ''}
+              {progress.chunksGathered !== undefined ? ` · ${progress.chunksGathered} chunks gathered` : ''}
+              {progress.nodes !== undefined ? ` · ${progress.nodes} entities, ${progress.edges ?? 0} relationships` : ''}
+            </>
+          ) : (
+            <>
+              Extracting… {processed} / {docCount} documents
+              {selectedWindows > 0 ? ` · ${completedWindows}/${selectedWindows} selected windows` : ''}
+              {' · '}{nodeCount} entities, {edgeCount} relationships
+            </>
+          )}
         </p>
       )}
 

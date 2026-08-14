@@ -11,6 +11,9 @@ import type { PromptKey, Settings } from '../shared/types';
 const PROMPT_LABELS: Record<PromptKey, string> = {
   notebookOverview: 'Notebook overview',
   graphExtraction: 'Knowledge graph extraction',
+  graphExtractionSentence: 'Knowledge graph extraction (target-sentence mode)',
+  graphExtractionGleaning: 'Knowledge graph extraction (gleaning follow-up)',
+  graphRelationTyping: 'Knowledge graph relation typing',
   communitySummary: 'Theme (community) summary',
   studioBriefing: 'Studio: Briefing',
   studioFaq: 'Studio: FAQ',

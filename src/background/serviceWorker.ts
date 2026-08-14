@@ -41,7 +41,15 @@ import {
   repoList,
 } from './offscreenClient';
 import { generateNotebookOverview, isOverviewStale } from './notebookOverview';
-import { buildRepoGraph, getDocWindows } from './graphExtract';
+import {
+  buildRepoGraph,
+  buildRepoGraphInstant,
+  buildRepoGraphQuick,
+  getDocWindows,
+  type GraphBuildBackboneProgress,
+  type GraphBuildInstantProgress,
+  type GraphBuildProgress,
+} from './graphExtract';
 import { generateStudioOutput } from './studioOutputs';
 import { studioGet } from './offscreenClient';
 import { resolveSentenceCitations } from './sentenceResolve';
@@ -51,6 +59,11 @@ import type { DocGraph } from '../shared/docGraph';
 // Repos with a graph build currently in flight (in-memory; lost on SW eviction,
 // after which a build resumes from the checkpointed graph on the next request).
 const graphBuilding = new Map<string, AbortController>();
+// Latest in-flight progress per repo (in-memory, same lifetime as
+// graphBuilding) — the build functions' onProgress callbacks write here so
+// notebook_graph_get can report live stage/doc progress to the UI's poll,
+// instead of only what's been checkpointed to graph.json so far.
+const graphBuildProgress = new Map<string, GraphBuildBackboneProgress | GraphBuildProgress | GraphBuildInstantProgress>();
 import { ingestFilesBatch } from './repoIngest';
 import { indexMailbox, type MailSyncProgress } from './mailIngest';
 import {
@@ -474,6 +487,7 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
         docCount: docs.length,
         docs: docs.map((d) => ({ id: d.id, name: d.name })),
         building: graphBuilding.has(request.repo),
+        progress: graphBuildProgress.get(request.repo),
       };
     })()
       .then(sendResponse)
@@ -481,7 +495,8 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     return true;
   }
   if (request.type === 'notebook_doc_windows') {
-    getDocWindows(request.repo, request.docId)
+    getSettings()
+      .then((settings) => getDocWindows(request.repo, request.docId, settings ?? undefined))
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
@@ -492,19 +507,48 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
     // firing mid-build — see swKeepalive.ts for why that's needed even with a
     // kept-open response channel.
     withSwKeepalive(async () => {
+      if (graphBuilding.has(request.repo)) return { ok: false, error: 'A graph build is already running for this notebook.' };
+      const onProgress = (p: GraphBuildBackboneProgress | GraphBuildProgress | GraphBuildInstantProgress) =>
+        graphBuildProgress.set(request.repo, p);
+      // The Instant tier clusters already-computed embeddings — it makes zero
+      // model calls of any kind, so unlike every other mode it doesn't need a
+      // main model configured at all. Branch before the settings gate below.
+      if (request.mode === 'instant') {
+        const controller = new AbortController();
+        graphBuilding.set(request.repo, controller);
+        try {
+          return await buildRepoGraphInstant(request.repo, { signal: controller.signal, onProgress });
+        } finally {
+          graphBuilding.delete(request.repo);
+          graphBuildProgress.delete(request.repo);
+        }
+      }
       const settings = await getSettings();
       if (!settings) return { ok: false, error: 'No model configured. Open Settings first.' };
-      if (graphBuilding.has(request.repo)) return { ok: false, error: 'A graph build is already running for this notebook.' };
       const controller = new AbortController();
       graphBuilding.set(request.repo, controller);
       try {
+        // Default ("Quick"): the on-device NER backbone plus a bounded,
+        // corpus-size-independent layer of LLM enrichment (community themes +
+        // typed-relation upgrades) — see buildRepoGraphQuick's doc comment.
+        // "Full" is the only mode still routed to the old window/sentence
+        // LLM extraction, whose call count scales with document count.
+        if (request.mode !== 'full') {
+          return await buildRepoGraphQuick(settings, request.repo, {
+            rebuild: request.rebuild,
+            signal: controller.signal,
+            onProgress,
+          });
+        }
         return await buildRepoGraph(settings, request.repo, {
           rebuild: request.rebuild,
-          mode: request.mode ?? 'quick',
+          mode: 'full',
           signal: controller.signal,
+          onProgress,
         });
       } finally {
         graphBuilding.delete(request.repo);
+        graphBuildProgress.delete(request.repo);
       }
     })
       .then(sendResponse)

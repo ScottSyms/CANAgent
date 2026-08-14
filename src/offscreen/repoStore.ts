@@ -68,7 +68,7 @@ interface RepoMeta {
   chunkCount: number;
   /** Source family for the repository. */
   kind?: RepoKind;
-  /** Embedder identity (e.g. `local:Xenova/all-MiniLM-L6-v2`) the vectors were built with. */
+  /** Embedder identity (e.g. `local:all-MiniLM-L6-v2-litert`) the vectors were built with. */
   embedModel?: string;
   /** Monotonic content revision. Absent on legacy repositories means revision 0. */
   corpusRevision?: number;
@@ -801,6 +801,30 @@ export async function repoDocChunks(
   return enrichChunks(meta, chunks)
     .slice(doc.chunkStart, doc.chunkStart + doc.chunkCount)
     .map((c) => ({ chunkId: c.chunkId ?? '', text: c.text, sentences: c.sentences ?? [] }));
+}
+
+/**
+ * One document's already-computed embedding vectors (from ingest — never
+ * re-embedded), plus the dequantization parameters needed to turn them back
+ * into cosine-comparable floats. Mirrors `repoDeleteDoc`'s slice-by-
+ * `chunkStart`/`chunkCount` read of `vectors.bin`. Used by the graph builder's
+ * embedding-cluster "Instant" tier so it needs zero new embedding calls.
+ */
+export async function repoDocVectors(
+  repo: string,
+  docId: string,
+): Promise<{ vectors: Int8Array; dim: number; perDimScale: number[] } | null> {
+  await assertVaultUsable();
+  const dir = await repoDir(repo);
+  const meta = await readJson<RepoMeta | null>(dir, 'meta.json', null);
+  if (!meta) return null;
+  const doc = meta.docs.find((d) => d.id === docId);
+  if (!doc) return null;
+  const dim = meta.dim;
+  const vecs = await readVectors(dir);
+  const start = doc.chunkStart * dim;
+  const end = (doc.chunkStart + doc.chunkCount) * dim;
+  return { vectors: vecs.subarray(start, end), dim, perDimScale: meta.perDimScale };
 }
 
 // ----- notebook studio outputs (briefing / FAQ / study guide) -----

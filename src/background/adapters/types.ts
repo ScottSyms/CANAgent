@@ -1,5 +1,5 @@
 import type { Settings } from '../../shared/types';
-import type { LlmMessage, LlmResponseMessage, ToolDefinition } from '../llmTypes';
+import type { LlmMessage, LlmResponseMessage, ResponseFormatSpec, ToolDefinition } from '../llmTypes';
 
 /** What `buildRequest` hands back to the generic fetch/retry wrapper in llmProvider.ts. */
 export interface AdapterRequest {
@@ -18,6 +18,6 @@ export interface AdapterRequest {
  * all shape-specific work here.
  */
 export interface ProtocolAdapter {
-  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[]): AdapterRequest;
+  buildRequest(settings: Settings, messages: LlmMessage[], tools?: ToolDefinition[], responseFormat?: ResponseFormatSpec): AdapterRequest;
   parseResponse(json: unknown): LlmResponseMessage;
 }
