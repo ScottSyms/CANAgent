@@ -39,6 +39,7 @@ import { resolvePrompt } from '../shared/promptDefaults';
 import { COMMUNITY_SUMMARY_SCHEMA, DOC_EXTRACTION_SCHEMA, RELATION_TYPING_SCHEMA } from '../shared/graphJsonSchemas';
 import { resolveSentenceCitations } from './sentenceResolve';
 import { dequantizeVector, normalizeVector } from '../shared/vectorSearch';
+import { graphBuilding } from './graphBuildState';
 
 // Halved from an earlier 12000: GraphRAG's own research found a small model
 // extracts substantially more entities from a smaller chunk (roughly 2x more
@@ -1367,6 +1368,19 @@ async function runNerBackbone(
 ): Promise<NerBackboneResult> {
   const touchedNodeIds = new Set<string>();
   const warnings: string[] = [];
+  // Checkpoint every NER_CHECKPOINT_BATCH successfully-extracted documents
+  // instead of every one (matching EXTRACTION_CONCURRENCY's batch size for
+  // consistency with the Full tier) — meaningfully fewer graph.json
+  // writes/encryptions over a large notebook. Accepted tradeoff: a service-
+  // worker eviction mid-batch now loses up to NER_CHECKPOINT_BATCH-1
+  // documents' worth of NER work instead of at most 1, since a retry simply
+  // re-extracts whatever wasn't checkpointed — no user data is lost, only
+  // some already-cheap on-device NER work. A clean Stop still flushes
+  // everything: buildRepoGraphQuick's caller-side `stoppedResult()` (and its
+  // own final `graphSet` on normal completion) unconditionally persists the
+  // in-memory graph regardless of where the last batch checkpoint landed.
+  const NER_CHECKPOINT_BATCH = EXTRACTION_CONCURRENCY;
+  let docsSinceCheckpoint = 0;
 
   const sortedDocs = [...docs].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
   for (const doc of sortedDocs) {
@@ -1411,8 +1425,12 @@ async function runNerBackbone(
     }
 
     opts.onDocDone();
-    const setRes = await graphSet(repo, graph, expectedRevision);
-    if (!setRes.ok) return { status: 'error', error: setRes.error ?? 'Failed to save graph.' };
+    docsSinceCheckpoint++;
+    if (docsSinceCheckpoint >= NER_CHECKPOINT_BATCH) {
+      const setRes = await graphSet(repo, graph, expectedRevision);
+      if (!setRes.ok) return { status: 'error', error: setRes.error ?? 'Failed to save graph.' };
+      docsSinceCheckpoint = 0;
+    }
   }
 
   if (opts.signal?.aborted) return { status: 'aborted', warnings };
@@ -1712,4 +1730,43 @@ export async function buildRepoGraphInstant(
   if (!setRes.ok) return { ok: false, error: setRes.error };
   report();
   return { ok: true, graph, warnings: warnings.length > 0 ? warnings : undefined };
+}
+
+const pendingInstantRefresh = new Map<string, ReturnType<typeof setTimeout>>();
+// Debounced so a burst of ingest activity for one repo (a multi-file batch, a
+// folder sync) triggers one background Instant build, not one per document.
+const INSTANT_REFRESH_DEBOUNCE_MS = 2000;
+
+/**
+ * Fire-and-forget: (re)build the free Instant tier shortly after ingestion
+ * activity quiets down for a repo, so its cheap embedding-derived topic graph
+ * (buildRepoGraphInstant — zero model/LLM calls, reuses chunk embeddings
+ * already computed for RAG) is ready by the time a user opens the graph
+ * panel, instead of requiring an explicit "Build" click first.
+ *
+ * Never competes with a real (Quick/Full/manual-Instant) build already
+ * running for the repo — skips silently if `graphBuilding.has(repo)`, and
+ * doesn't claim that map slot itself beyond the build it starts, so a
+ * `notebook_graph_build` request that arrives after this schedules but before
+ * it fires still sees the repo as free. A failure (including losing the
+ * corpusRevision race to a concurrent add — `repoGraphSet`'s own
+ * `expectedRevision` check) is swallowed: this is a nice-to-have background
+ * refresh, not a request a caller is waiting on, and the next ingest call
+ * naturally re-schedules another attempt.
+ */
+export function scheduleInstantGraphRefresh(repo: string): void {
+  const existing = pendingInstantRefresh.get(repo);
+  if (existing) clearTimeout(existing);
+  pendingInstantRefresh.set(
+    repo,
+    setTimeout(() => {
+      pendingInstantRefresh.delete(repo);
+      if (graphBuilding.has(repo)) return; // a real build already owns this repo
+      const controller = new AbortController();
+      graphBuilding.set(repo, controller);
+      buildRepoGraphInstant(repo, { signal: controller.signal })
+        .catch((error) => console.warn(`[graphExtract] background Instant-tier refresh failed for "${repo}":`, error))
+        .finally(() => graphBuilding.delete(repo));
+    }, INSTANT_REFRESH_DEBOUNCE_MS),
+  );
 }

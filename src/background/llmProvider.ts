@@ -4,6 +4,8 @@ import { getAdapter } from './adapters';
 import { apiVersion, authHeaders, buildUrl, LLM_TIMEOUT_MS, requestWithRetry, resolve, type RetryOpts } from './llmNetwork';
 import { LlmError } from './llmTypes';
 import type { ContentPart, LlmMessage, LlmResponseMessage, LlmToolCall, ResponseFormatSpec, ToolDefinition } from './llmTypes';
+import { getProvider } from './providers/registry';
+import type { ProviderChatMessage } from './providers/types';
 
 // =============================================================================
 // Multi-protocol network adapter — the only module that talks to a model
@@ -78,6 +80,7 @@ export function resolveModelForRole(settings: Settings, role: ModelRole): Settin
     baseUrl: profile.baseUrl,
     apiKey: profile.apiKey,
     model: profile.model,
+    subscriptionProvider: profile.subscriptionProvider,
     protocol: profile.protocol,
     apiVersion: profile.apiVersion,
     temperature: profile.temperature ?? settings.temperature,
@@ -224,6 +227,44 @@ export async function complete(
   onRetry?: RetryOpts['onRetry'],
   responseFormat?: ResponseFormatSpec,
 ): Promise<LlmResponseMessage> {
+  if (settings.subscriptionProvider) {
+    const provider = getProvider(settings.subscriptionProvider);
+    if (messagesContainImage(messages) && !provider.capabilities.images) {
+      throw new LlmError(`${settings.subscriptionProvider} does not support image input through its verified CANChat transport.`);
+    }
+    const status = await provider.getConnectionStatus();
+    if (status.status !== 'connected') {
+      throw new LlmError(status.detail || `Connect ${settings.subscriptionProvider} in Settings → Models → Providers first.`);
+    }
+    const normalized: ProviderChatMessage[] = messages.map((message) => {
+      let content: string;
+      if (typeof message.content === 'string') content = message.content;
+      else if (Array.isArray(message.content)) {
+        content = message.content.map((part) => part.type === 'text' ? part.text : '[Image omitted]').join('\n');
+      } else content = '';
+      if (message.role === 'tool') {
+        return { role: 'user' as const, content: `[Tool result for ${message.tool_call_id ?? 'unknown call'}]\n${content}` };
+      }
+      const role: ProviderChatMessage['role'] =
+        message.role === 'system' || message.role === 'assistant' ? message.role : 'user';
+      if (message.tool_calls?.length) {
+        content += `\n\n[Previous tool calls]\n${JSON.stringify(message.tool_calls)}`;
+      }
+      return { role, content };
+    });
+    try {
+      const text = await provider.streamResponse(
+        { messages: normalized, model: settings.model || undefined, signal },
+        () => {},
+      );
+      if (!text.trim()) throw new LlmError('Subscription provider returned an empty response.');
+      return { role: 'assistant', content: text };
+    } catch (error) {
+      if (error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError')) throw error;
+      if (error instanceof LlmError) throw error;
+      throw new LlmError(error instanceof Error ? error.message : String(error));
+    }
+  }
   const adapter = getAdapter(settings.protocol);
   let currentResponseFormat = responseFormat;
   let triedWithoutResponseFormat = false;

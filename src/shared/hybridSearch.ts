@@ -87,7 +87,7 @@ export function hybridSearch(params: HybridParams): SearchHit[] {
   const pool = params.pool ?? Math.max(k * 10, 50);
   // Fusion only ever consumes each list's top `pool` entries, so the dense
   // ranking only needs its top-`pool` computed, not a full sort of the corpus.
-  const semantic = scoreVectors({ dim, perDimScale, chunkCount, vectors, queryVector }, pool);
+  const semantic = scoreVectors({ dim, perDimScale, chunkCount, vectors, queryVector, queryAlreadyNormalized: params.queryAlreadyNormalized }, pool);
   const keyword = params.keywordIndex ? bm25RankIndexed({ index: params.keywordIndex, query }) : bm25Rank({ chunks, query });
   // No query terms matched anything lexically: nothing to fuse, just use dense.
   const lists = keyword.length > 0 ? [semantic, keyword] : [semantic];

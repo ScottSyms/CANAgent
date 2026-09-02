@@ -256,6 +256,25 @@ export function repoAddBatch(
   return repoRequest({ target: 'offscreen-repo', op: 'addBatch', repo, docs, ...opts });
 }
 
+/**
+ * Fused local-embedder ingest (see repoStore.repoIngestLocalBatch): embed +
+ * normalize/quantize + persist inside ONE offscreen round trip, instead of
+ * an `embed_local` call followed by a separate `repoAdd`/`repoAddBatch`
+ * call. Local embedder only — routes the same as `repoAddBatch` otherwise.
+ */
+export function repoIngestLocalBatch(
+  repo: string,
+  docs: Array<{
+    doc: { name: string; url: string };
+    chunks: string[];
+    docExtra?: { path?: string; mtime?: number; size?: number };
+    docId?: string;
+  }>,
+  opts: { model?: string; kind?: RepoKind } = {},
+): Promise<RepoResponse> {
+  return repoRequest({ target: 'offscreen-repo', op: 'ingestLocalBatch', repo, docs, ...opts });
+}
+
 export function repoSearch(
   repo: string,
   queryVector: number[],

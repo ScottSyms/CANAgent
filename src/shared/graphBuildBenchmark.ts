@@ -5,13 +5,19 @@
 // NER-shaped co-occurrence extractions (src/shared/nerAggregate.ts), the
 // ANN-bucketed embedding dedup (mergeSimilarNodes, src/shared/docGraph.ts),
 // and community detection (src/shared/graphCommunities.ts) — with
-// performance.now(), then adds a stubbed per-call latency for the one stage
-// this can't measure for real: the bounded LLM enrichment pass (community
-// summaries + typed-relation upgrades), which needs a live model server. The
-// call *count* for that stage is exact (mirrors buildRepoGraphQuick's own
-// selection logic), only the per-call latency is a stand-in — a reasonable
-// one for the embedded (local, small-context model) use case this pipeline
-// targets.
+// performance.now(). `measuredMs` (the CI-gated figure) is the sum of ONLY
+// those three real measurements.
+//
+// The one stage this can't measure for real is the bounded LLM enrichment
+// pass (community summaries + typed-relation upgrades), which needs a live
+// model server. Its call *count* is exact (mirrors buildRepoGraphQuick's own
+// selection logic) and IS load-bearing (see the "stays fixed as corpus grows"
+// test) — but its *latency* is necessarily a stand-in constant
+// (`enrichmentLatencyMs`), so `projectedEnrichmentMs`/`projectedTotalMs` are
+// reported separately and clearly labeled as projections, never folded into
+// `measuredMs` or the pass/fail budget check. An earlier version of this file
+// summed the stand-in into one undifferentiated "TOTAL" ms figure, which
+// looked like a measurement but wasn't — don't reintroduce that.
 //
 // Deliberately avoids importing src/background/graphExtract.ts (or anything
 // under src/background/offscreenClient.ts) — same reasoning
@@ -39,9 +45,13 @@ export interface GraphBuildBenchmarkResult {
   nerMergeMs: number;
   dedupMs: number;
   communityDetectionMs: number;
+  /** Sum of nerMergeMs + dedupMs + communityDetectionMs only — real performance.now() measurements, nothing projected. This is what the budget check gates on. */
+  measuredMs: number;
   enrichmentCallCount: number;
+  /** Math.ceil(enrichmentCallCount / ENRICHMENT_CONCURRENCY) * enrichmentLatencyMs — a projection from an assumed per-call latency, not a measurement. Informational only. */
   projectedEnrichmentMs: number;
-  totalMs: number;
+  /** measuredMs + projectedEnrichmentMs. Informational estimate of end-to-end wall-clock; NOT used for pass/fail (see measuredMs). */
+  projectedTotalMs: number;
 }
 
 function pseudoRandomVector(seed: number, dim: number): number[] {
@@ -116,6 +126,7 @@ export async function runGraphBuildBenchmark(
   const communityCalls = Math.min(communities.length, MAX_COMMUNITIES);
   const enrichmentCallCount = relationCalls + communityCalls;
   const projectedEnrichmentMs = Math.ceil(enrichmentCallCount / ENRICHMENT_CONCURRENCY) * enrichmentLatencyMs;
+  const measuredMs = nerMergeMs + dedupMs + communityDetectionMs;
 
   return {
     docCount,
@@ -125,11 +136,12 @@ export async function runGraphBuildBenchmark(
     nerMergeMs,
     dedupMs,
     communityDetectionMs,
+    measuredMs,
     enrichmentCallCount,
     projectedEnrichmentMs,
-    totalMs: nerMergeMs + dedupMs + communityDetectionMs + projectedEnrichmentMs,
+    projectedTotalMs: measuredMs + projectedEnrichmentMs,
   };
 }
 
-/** The plan's target: a large graph builds in under 30s on an M2 Mac 32GB. */
+/** The real (non-LLM-projected) Quick-build stages should stay well under this on an M2 Mac 32GB — gates `measuredMs`, not the LLM-inclusive projection. */
 export const GRAPH_BUILD_BENCHMARK_BUDGET_MS = 30000;

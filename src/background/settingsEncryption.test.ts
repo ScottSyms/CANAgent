@@ -43,6 +43,20 @@ describe('settings secret encryption at rest', () => {
     expect((await getSettings())?.transcriptionApiKey).toBe('sk-trans');
   });
 
+  it('accepts a subscription provider without endpoint credentials', async () => {
+    await saveSettings({
+      baseUrl: '',
+      apiKey: '',
+      model: 'copilot-model',
+      subscriptionProvider: 'github-copilot',
+    });
+    await expect(getSettings()).resolves.toMatchObject({
+      model: 'copilot-model',
+      subscriptionProvider: 'github-copilot',
+      apiKey: '',
+    });
+  });
+
   it('unlocked vault: every secret field is ciphertext at rest, decrypted on read', async () => {
     await setupVault('correct horse battery staple');
     await saveSettings(full);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dequantizeVector, normalizeVector, quantizeVector, searchVectors } from './vectorSearch';
+import { dequantizeVector, normalizeVector, quantizeVector, scoreVectors, searchVectors } from './vectorSearch';
 
 describe('normalizeVector', () => {
   it('returns a unit vector', () => {
@@ -73,5 +73,33 @@ describe('searchVectors', () => {
     expect(() =>
       searchVectors({ dim, perDimScale, chunkCount: raw.length, vectors, chunks, queryVector: [1, 0, 0], k: 1 }),
     ).toThrow(/dimension/);
+  });
+
+  describe('queryAlreadyNormalized', () => {
+    it('is a no-op for a truly unit-norm query: identical scores with the flag set or omitted', () => {
+      const unitQuery = normalizeVector([3, 4]); // already unit-norm
+      const withFlag = scoreVectors({ dim, perDimScale, chunkCount: raw.length, vectors, queryVector: unitQuery, queryAlreadyNormalized: true });
+      const withoutFlag = scoreVectors({ dim, perDimScale, chunkCount: raw.length, vectors, queryVector: unitQuery });
+      expect(withFlag).toEqual(withoutFlag);
+    });
+
+    it('actually skips normalization: a non-unit query scores differently depending on the flag', () => {
+      // Magnitude clearly != 1, but each component stays under the int8
+      // quantizer's per-dim clamp (|v[d]| > scale[d] would saturate both the
+      // normalized and un-normalized quantization to the same clamped value
+      // and hide the effect this test is checking for).
+      const nonUnitQuery = [0.9, 0.9];
+      const magnitude = Math.sqrt(0.9 ** 2 + 0.9 ** 2);
+      const normalizedResult = scoreVectors({ dim, perDimScale, chunkCount: raw.length, vectors, queryVector: nonUnitQuery, queryAlreadyNormalized: false });
+      const skippedResult = scoreVectors({ dim, perDimScale, chunkCount: raw.length, vectors, queryVector: nonUnitQuery, queryAlreadyNormalized: true });
+      // Same ranking (normalization doesn't change relative order for a
+      // fixed query), but different raw scores -- proves the flag genuinely
+      // changed what was computed, not just a no-op parameter.
+      expect(skippedResult.map((r) => r.i)).toEqual(normalizedResult.map((r) => r.i));
+      expect(skippedResult[0].score).not.toBeCloseTo(normalizedResult[0].score, 5);
+      // Skipping normalization on a magnitude-`magnitude` query should scale
+      // scores by roughly that same factor relative to the normalized computation.
+      expect(skippedResult[0].score / normalizedResult[0].score).toBeCloseTo(magnitude, 1);
+    });
   });
 });

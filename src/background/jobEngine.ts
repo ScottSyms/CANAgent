@@ -8,6 +8,7 @@
 // pattern; persistence is jobStore.ts.
 // =============================================================================
 
+import { mapWithConcurrency } from '../shared/asyncPool';
 import type { Settings } from '../shared/types';
 import {
   addLeads,
@@ -65,20 +66,6 @@ export function jobIdFromAlarm(name: string): string | null {
 }
 function armTick(id: string, delayMs: number): void {
   chrome.alarms.create(alarmName(id), { when: Date.now() + Math.max(0, delayMs) });
-}
-
-async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  const workers = new Array(Math.min(Math.max(1, limit), items.length)).fill(0).map(async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) return;
-      out[i] = await fn(items[i]);
-    }
-  });
-  await Promise.all(workers);
-  return out;
 }
 
 /** Create and start a durable job. Returns immediately; the first tick seeds it. */

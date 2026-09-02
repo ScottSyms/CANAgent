@@ -18,7 +18,10 @@ describe('runGraphBuildBenchmark', () => {
     const result = await runGraphBuildBenchmark();
     expect(result.nodeCount).toBeGreaterThan(1000);
     expect(result.edgeCount).toBeGreaterThan(1000);
-    expect(result.totalMs).toBeLessThan(GRAPH_BUILD_BENCHMARK_BUDGET_MS);
+    // Gate on the real measurement only -- projectedTotalMs folds in a
+    // stand-in LLM-latency constant and must never be what CI passes/fails on.
+    expect(result.measuredMs).toBeLessThan(GRAPH_BUILD_BENCHMARK_BUDGET_MS);
+    expect(result.measuredMs).toBe(result.nerMergeMs + result.dedupMs + result.communityDetectionMs);
   }, 40000);
 
   it('keeps the projected enrichment call count fixed (capped) even as the corpus grows 5x', async () => {
@@ -34,6 +37,7 @@ describe('runGraphBuildBenchmark', () => {
     expect(small.enrichmentCallCount).toBe(MAX_RELATION_TYPING_EDGES + MAX_COMMUNITIES);
     expect(large.enrichmentCallCount).toBe(MAX_RELATION_TYPING_EDGES + MAX_COMMUNITIES);
     expect(large.projectedEnrichmentMs).toBe(small.projectedEnrichmentMs); // same call count -> same projected time
+    expect(large.projectedTotalMs).toBe(large.measuredMs + large.projectedEnrichmentMs);
   }, 40000);
 
   it('local benchmark constants stay in sync with graphExtract.ts (this module intentionally does not import it)', () => {

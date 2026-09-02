@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // complete() is the only model touchpoint; mock it so extraction is deterministic.
 const complete = vi.fn();
@@ -83,6 +83,7 @@ import {
   extractWindowAdaptive,
   getDocWindows,
   looksTruncated,
+  scheduleInstantGraphRefresh,
   scoreWindowInformationValue,
   splitTaggedWindow,
   summarizeCommunities,
@@ -91,6 +92,7 @@ import {
   windowDocChunks,
   windowDocChunksForNer,
 } from './graphExtract';
+import { graphBuilding } from './graphBuildState';
 import { LlmError } from './llmProvider';
 import { emptyDocGraph, mergeExtraction } from '../shared/docGraph';
 import { detectCommunities, extractiveCommunitySummary } from '../shared/graphCommunities';
@@ -1021,6 +1023,46 @@ describe('buildRepoGraphQuick', () => {
     expect(result.graph?.edges.every((e) => e.relation === 'knows')).toBe(true);
   });
 
+  it('checkpoints the Quick-tier NER backbone every NER_CHECKPOINT_BATCH docs, not after every single document', async () => {
+    // 5 single-entity documents, each contributing exactly one distinct node
+    // and zero co-occurrence edges (buildCoOccurrenceExtraction needs >=2
+    // entities per sentence) -- keeps dedup/enrichment fully inert (no merges,
+    // no edges to type, no community reaches the 3-node minimum) so every
+    // graphSet call observed here is attributable to checkpoint batching
+    // alone, not some other conditional checkpoint path.
+    const docIds = ['a', 'b', 'c', 'd', 'e'];
+    graphSnapshot.mockResolvedValue({
+      ok: true,
+      result: { docs: docIds.map((id) => ({ id, name: `${id}.md` })), corpusRevision: 1 },
+    });
+    graphGetRaw.mockResolvedValue({ ok: true, result: null });
+    docChunks.mockImplementation(async (_repo: string, id: string) => {
+      const text = `Person${id} was here.`;
+      return { ok: true, result: [{ text, sentences: [{ id: `${id}:c0:s0`, start: 0, end: text.length }] }] };
+    });
+    for (const id of docIds) {
+      const text = `Person${id} was here.`;
+      nerLocal.mockResolvedValueOnce({ ok: true, spans: [[{ label: 'PER', start: 0, end: text.indexOf(' was'), score: 0.9 }]], model: 'test-ner-model' });
+    }
+    const snapshots: Array<{ nodes: unknown[] }> = [];
+    graphSet.mockImplementation(async (_repo: string, graph: { nodes: unknown[] }) => {
+      snapshots.push(JSON.parse(JSON.stringify(graph)));
+      return { ok: true };
+    });
+
+    const result = await buildRepoGraphQuick(S, 'repo');
+
+    expect(result.ok).toBe(true);
+    expect(result.graph?.nodes).toHaveLength(5); // all 5 distinct entities present in the end
+    expect(complete).not.toHaveBeenCalled(); // no edges to type, no community to summarize
+    // Batch-of-4 mid-loop checkpoint (after doc #4), plus buildRepoGraphQuick's
+    // own unconditional final checkpoint = 2 -- NOT one per document (which
+    // would have been 5, pre-batching).
+    expect(snapshots.length).toBe(2);
+    expect(snapshots[0].nodes).toHaveLength(4); // the batched checkpoint captured 4 docs' worth in one write
+    expect(snapshots[1].nodes).toHaveLength(5); // the final checkpoint has the 5th doc's work too
+  });
+
   it('does not spend any enrichment calls on a no-op rebuild (nothing new, communities already exist)', async () => {
     setUpOneDoc();
     complete.mockResolvedValue({ content: '{"title":"Friends","summary":"They met.","evidence":[]}' });
@@ -1119,7 +1161,11 @@ describe('buildRepoGraphQuick', () => {
     // node has no surviving co-occurrence edge (the pair's only edge becomes
     // a self-loop and is dropped) and too few nodes for a community, so
     // enrichment makes zero LLM calls and thus adds no further checkpoint --
-    // same checkpoint count as the plain NER backbone would produce.
+    // same checkpoint count as the plain NER backbone would produce. Only 1
+    // document is processed here, below NER_CHECKPOINT_BATCH, so the per-doc
+    // extraction checkpoint inside runNerBackbone's loop never fires -- that
+    // work is instead flushed by buildRepoGraphQuick's own unconditional
+    // final graphSet call.
     const text = 'Acme Corp. met Acme Corporation.';
     graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [{ id: 'a', name: 'A.md' }], corpusRevision: 1 } });
     graphGetRaw.mockResolvedValue({ ok: true, result: null });
@@ -1146,10 +1192,11 @@ describe('buildRepoGraphQuick', () => {
 
     expect(result.ok).toBe(true);
     expect(complete).not.toHaveBeenCalled(); // no edges to type, no community to summarize
-    // Extraction checkpoint (1 doc), dedup checkpoint, final checkpoint = 3.
-    expect(snapshots.length).toBe(3);
-    const dedupSnapshot = snapshots[1];
-    const finalSnapshot = snapshots[2];
+    // Dedup checkpoint, final checkpoint = 2 -- no per-doc extraction
+    // checkpoint since 1 doc is below NER_CHECKPOINT_BATCH (see comment above).
+    expect(snapshots.length).toBe(2);
+    const dedupSnapshot = snapshots[0];
+    const finalSnapshot = snapshots[1];
     expect(dedupSnapshot.nodes).toHaveLength(1); // already merged down to 1 node at the dedup checkpoint
     expect(dedupSnapshot.communities).toBeUndefined(); // enrichment hasn't run yet
     expect(finalSnapshot.nodes).toHaveLength(1);
@@ -1722,5 +1769,50 @@ describe('buildRepoGraph coverage', () => {
     expect(result.graph?.failedDocIds ?? []).toEqual([]);
     expect(result.warnings?.some((w) => w.includes('A.md') && w.includes('1 of 2'))).toBe(true);
     expect(result.graph?.nodes.map((n) => n.label)).toEqual(['a:c0:s0']); // the recoverable window's data made it in
+  });
+});
+
+describe('scheduleInstantGraphRefresh', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    graphBuilding.clear();
+  });
+
+  it('debounces multiple rapid calls for the same repo into one background build', async () => {
+    graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [], corpusRevision: 1 } });
+
+    scheduleInstantGraphRefresh('repo-1');
+    scheduleInstantGraphRefresh('repo-1');
+    scheduleInstantGraphRefresh('repo-1');
+    await vi.advanceTimersByTimeAsync(2100);
+
+    // buildRepoGraphInstant's first call is graphSnapshot -- one call proves
+    // exactly one build ran, not three.
+    expect(graphSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fire while a real build already owns the repo', async () => {
+    graphSnapshot.mockResolvedValue({ ok: true, result: { docs: [], corpusRevision: 1 } });
+    graphBuilding.set('repo-2', new AbortController());
+
+    scheduleInstantGraphRefresh('repo-2');
+    await vi.advanceTimersByTimeAsync(2100);
+
+    expect(graphSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('does not throw or leave an unhandled rejection when the background build fails', async () => {
+    graphSnapshot.mockRejectedValue(new Error('offscreen unreachable'));
+
+    expect(() => scheduleInstantGraphRefresh('repo-3')).not.toThrow();
+    // If the background build's rejection weren't caught, this await itself
+    // would reject and fail the test.
+    await vi.advanceTimersByTimeAsync(2100);
+    // The failed attempt released its claim on graphBuilding rather than
+    // leaving the repo permanently marked as "building".
+    expect(graphBuilding.has('repo-3')).toBe(false);
   });
 });

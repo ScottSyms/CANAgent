@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getVaultState, lockVault, setupVault, unlockVault, vaultDecrypt, vaultEncrypt } from '../background/vault';
-import { repoAdd, repoSearch } from './repoStore';
+import { repoAdd, repoDocChunks, repoDocVectors, repoSearch } from './repoStore';
 
 // ---- OPFS fake (positional writes + keepExistingData, same surface repoStore uses) ----
 
@@ -122,11 +122,16 @@ describe('repo encryption at rest', () => {
 
   it('locked vault: repo reads and writes are refused', async () => {
     await setupVault('pw');
-    await repoAdd('r', { name: 'a', url: 'file:///a' }, ['body'], [vec(8, 1)], { embedModel: 'local:m' });
+    const { docId } = await repoAdd('r', { name: 'a', url: 'file:///a' }, ['body'], [vec(8, 1)], { embedModel: 'local:m' });
     await lockVault();
 
     await expect(repoSearch('r', vec(8, 1), 3, 'local:m')).rejects.toThrow(/Unlock the encryption vault/);
     await expect(repoAdd('r', { name: 'b', url: 'file:///b' }, ['x'], [vec(8, 2)], { embedModel: 'local:m' })).rejects.toThrow(/Unlock the encryption vault/);
+    // The doc-scoped readers (used by graph builds) share repoSearch's corpus
+    // cache as of the caching fix in repoStore.ts -- confirm the vault gate
+    // still runs before any cache lookup, same as before that change.
+    await expect(repoDocChunks('r', docId)).rejects.toThrow(/Unlock the encryption vault/);
+    await expect(repoDocVectors('r', docId)).rejects.toThrow(/Unlock the encryption vault/);
 
     await unlockVault('pw');
     const res = await repoSearch('r', vec(8, 1), 3, 'local:m');

@@ -1,6 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+// repoIngestLocalBatch dynamically imports localEmbed.ts, which needs a real
+// browser (LiteRT/WASM, chrome.runtime.getURL) — mock it with a deterministic
+// per-text embedder so the fused offscreen op can be tested against the same
+// "two separate calls" reference path without a real model.
+const embedTextsLocalMock = vi.fn(async (texts: string[], model?: string) => ({
+  vectors: texts.map((t) => Array.from({ length: 8 }, (_, i) => Math.sin(t.length + i) + 1.5)),
+  model: model ?? 'all-MiniLM-L6-v2-litert',
+}));
+vi.mock('./localEmbed', () => ({
+  embedTextsLocal: (texts: string[], model?: string) => embedTextsLocalMock(texts, model),
+  DEFAULT_LOCAL_MODEL: 'all-MiniLM-L6-v2-litert',
+}));
+
 import {
   repoAdd,
+  repoAddBatch,
   repoDeleteDoc,
   repoDocChunks,
   repoDocVectors,
@@ -10,6 +25,7 @@ import {
   repoGraphSnapshot,
   repoGraphSet,
   repoImportOne,
+  repoIngestLocalBatch,
   repoList,
   repoNotebookGet,
   repoNotebookSample,
@@ -21,105 +37,16 @@ import {
 import type { NotebookOverview } from '../shared/types';
 import { emptyDocGraph, mergeExtraction } from '../shared/docGraph';
 import { dequantizeVector, normalizeVector } from '../shared/vectorSearch';
-
-// ---- minimal in-memory OPFS fake (only the surface repoStore uses) ----
-
-class FakeWritable {
-  constructor(
-    private file: FakeFileHandle,
-    keepExistingData: boolean,
-  ) {
-    if (!keepExistingData) file.bytes = new Uint8Array(0);
-  }
-  async write(
-    input: string | BufferSource | { type: 'write'; position: number; data: string | BufferSource },
-  ): Promise<void> {
-    const toBytes = (d: string | BufferSource): Uint8Array =>
-      typeof d === 'string' ? new TextEncoder().encode(d) : new Uint8Array(d as ArrayBuffer);
-    let position: number;
-    let data: Uint8Array;
-    if (input && typeof input === 'object' && 'type' in input) {
-      position = input.position;
-      data = toBytes(input.data);
-    } else {
-      position = this.file.bytes.length;
-      data = toBytes(input as string | BufferSource);
-    }
-    const end = position + data.length;
-    if (end > this.file.bytes.length) {
-      const grown = new Uint8Array(end);
-      grown.set(this.file.bytes);
-      this.file.bytes = grown;
-    }
-    this.file.bytes.set(data, position);
-  }
-  async close(): Promise<void> {}
-}
-
-class FakeFileHandle {
-  kind = 'file' as const;
-  bytes = new Uint8Array(0);
-  constructor(public name: string) {}
-  async getFile() {
-    const bytes = this.bytes;
-    return {
-      size: bytes.length,
-      async text() {
-        return new TextDecoder().decode(bytes);
-      },
-      async arrayBuffer() {
-        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-      },
-    };
-  }
-  async createWritable(opts?: { keepExistingData?: boolean }) {
-    return new FakeWritable(this, opts?.keepExistingData ?? false);
-  }
-}
-
-class FakeDirHandle {
-  kind = 'directory' as const;
-  dirs = new Map<string, FakeDirHandle>();
-  files = new Map<string, FakeFileHandle>();
-  constructor(public name: string) {}
-  async getDirectoryHandle(name: string, opts?: { create?: boolean }) {
-    let d = this.dirs.get(name);
-    if (!d) {
-      if (!opts?.create) throw new Error('NotFound');
-      d = new FakeDirHandle(name);
-      this.dirs.set(name, d);
-    }
-    return d;
-  }
-  async getFileHandle(name: string, opts?: { create?: boolean }) {
-    let f = this.files.get(name);
-    if (!f) {
-      if (!opts?.create) throw new Error('NotFound');
-      f = new FakeFileHandle(name);
-      this.files.set(name, f);
-    }
-    return f;
-  }
-  async removeEntry(name: string) {
-    this.dirs.delete(name);
-    this.files.delete(name);
-  }
-  async *entries(): AsyncGenerator<[string, FakeDirHandle | FakeFileHandle]> {
-    for (const [n, d] of this.dirs) yield [n, d];
-    for (const [n, f] of this.files) yield [n, f];
-  }
-}
+import { FakeDirHandle, installFakeOpfs } from './fakeOpfs';
 
 const vec = (n: number, seed: number): number[] => Array.from({ length: n }, (_, i) => Math.sin(seed + i) + 1.5);
 
 beforeEach(() => {
-  const root = new FakeDirHandle('root');
-  vi.stubGlobal('navigator', { storage: { getDirectory: async () => root } });
-  // repoStore now consults the vault (chrome.storage) to decide whether to
+  // repoStore consults the vault (chrome.storage) to decide whether to
   // encrypt. Empty storage ⇒ no vault ⇒ plaintext, so these existing tests are
   // unaffected. (Encryption behavior is covered in repoEncryption.test.ts.)
-  const empty = () => ({ async get() { return {}; }, async set() {}, async remove() {} });
-  vi.stubGlobal('chrome', { storage: { local: empty(), session: empty() } });
+  installFakeOpfs();
+  embedTextsLocalMock.mockClear();
 });
 
 describe('repoStore model lock', () => {
@@ -149,6 +76,79 @@ describe('repoStore model lock', () => {
     // Now a different embedder is accepted (re-index).
     const res = await repoAdd('r', { name: 'b', url: 'file:///b' }, ['world'], [vec(8, 2)], { embedModel: 'external:te3' });
     expect(res.chunkCount).toBe(1);
+  });
+});
+
+describe('repoSearch redundant-normalization skip', () => {
+  it('skips query normalization for a local: embedModel repo but not for an external: one', async () => {
+    // The local embedder's own model graph already normalizes its output, so
+    // repoSearch is expected to pass an un-normalized query straight through
+    // for a `local:`-tagged repo, and to still normalize it for `external:`.
+    await repoAdd('r-local', { name: 'a', url: 'file:///a' }, ['alpha'], [[1, 0]], { embedModel: 'local:minilm' });
+    await repoAdd('r-ext', { name: 'a', url: 'file:///a' }, ['alpha'], [[1, 0]], { embedModel: 'external:te3' });
+
+    const nonUnitQuery = [0.9, 0]; // magnitude 0.9 -- deliberately not unit-norm
+    const localRes = await repoSearch('r-local', nonUnitQuery, 1, 'local:minilm');
+    const extRes = await repoSearch('r-ext', nonUnitQuery, 1, 'external:te3');
+
+    // Same single chunk either way, but the un-normalized query yields a
+    // score scaled by ~0.9 relative to the normalized (external) computation
+    // -- proof the local path genuinely skipped normalization end-to-end,
+    // not just that scoreVectors' own unit test passed in isolation. Ratio
+    // (not absolute score) comparison, since int8 quantization rounding adds
+    // discrete noise absolute scores don't tolerate at this precision.
+    expect(localRes.results[0].score / extRes.results[0].score).toBeCloseTo(0.9, 1);
+  });
+});
+
+describe('repoIngestLocalBatch', () => {
+  const docs = [
+    { doc: { name: 'a', url: 'file:///a' }, chunks: ['alpha one', 'alpha two'] },
+    { doc: { name: 'b', url: 'file:///b' }, chunks: ['beta one'] },
+  ];
+
+  it('produces the same stored chunks/vectors as calling embedTextsLocal then repoAddBatch separately', async () => {
+    // Reference path: the two-step sequence repoIngestLocalBatch replaces.
+    const allChunks = docs.flatMap((d) => d.chunks);
+    const { vectors } = await embedTextsLocalMock(allChunks);
+    let offset = 0;
+    const withVectors = docs.map((d) => {
+      const v = vectors.slice(offset, offset + d.chunks.length);
+      offset += d.chunks.length;
+      return { doc: d.doc, chunks: d.chunks, vectors: v };
+    });
+    await repoAddBatch('repo-reference', withVectors, { embedModel: 'local:all-MiniLM-L6-v2-litert' });
+
+    // Fused path under test.
+    const results = await repoIngestLocalBatch('repo-fused', docs, { model: 'all-MiniLM-L6-v2-litert' });
+    expect(results.every((r) => r.ok)).toBe(true);
+
+    const reference = await repoExportOne('repo-reference');
+    const fused = await repoExportOne('repo-fused');
+    expect(fused?.vectorsB64).toBe(reference?.vectorsB64); // same embeddings, same quantization
+    expect((fused?.chunks as Array<{ text: string }>).map((c) => c.text)).toEqual(
+      (reference?.chunks as Array<{ text: string }>).map((c) => c.text),
+    );
+    expect(fused?.meta).toMatchObject({ embedModel: 'local:all-MiniLM-L6-v2-litert', chunkCount: 3 });
+  });
+
+  it('embeds every document\'s chunks in a single embedTextsLocal call, not once per document', async () => {
+    await repoIngestLocalBatch('repo-x', docs, { model: 'all-MiniLM-L6-v2-litert' });
+    expect(embedTextsLocalMock).toHaveBeenCalledTimes(1);
+    expect(embedTextsLocalMock.mock.calls[0][0]).toEqual(['alpha one', 'alpha two', 'beta one']);
+  });
+
+  it('degrades every document to a per-doc error when the embed call fails, instead of throwing', async () => {
+    embedTextsLocalMock.mockRejectedValueOnce(new Error('model load failed'));
+    const results = await repoIngestLocalBatch('repo-y', docs, { model: 'all-MiniLM-L6-v2-litert' });
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => !r.ok && r.error.includes('model load failed'))).toBe(true);
+  });
+
+  it('returns [] for an empty batch without calling the embedder', async () => {
+    const results = await repoIngestLocalBatch('repo-z', []);
+    expect(results).toEqual([]);
+    expect(embedTextsLocalMock).not.toHaveBeenCalled();
   });
 });
 
@@ -327,6 +327,48 @@ describe('document graph', () => {
     await repoAdd('r', { name: 'a', url: 'file:///a' }, ['hello'], [vec(8, 1)], { embedModel: 'local:minilm' });
     expect(await repoDocVectors('r', 'nope')).toBeNull();
     expect(await repoDocVectors('no-such-repo', 'nope')).toBeNull();
+  });
+
+  describe('corpus data caching (repoDocChunks/repoDocVectors)', () => {
+    it('reads chunks.json/vectors.bin at most once across repeated doc-scoped reads for the same repo', async () => {
+      const { docId: docA } = await repoAdd('r', { name: 'a', url: 'file:///a' }, ['alpha one', 'alpha two'], [vec(8, 1), vec(8, 2)], {
+        embedModel: 'local:minilm',
+      });
+      const { docId: docB } = await repoAdd('r', { name: 'b', url: 'file:///b' }, ['beta one'], [vec(8, 3)]);
+
+      // Only spy from here -- the two repoAdd calls above have their own
+      // (expected) chunks.json/vectors.bin reads+writes that aren't part of
+      // what this test is checking.
+      const getFileHandleSpy = vi.spyOn(FakeDirHandle.prototype, 'getFileHandle');
+
+      await repoDocChunks('r', docA);
+      await repoDocChunks('r', docB);
+      await repoDocVectors('r', docA);
+      await repoDocVectors('r', docB);
+
+      const countFor = (file: string) => getFileHandleSpy.mock.calls.filter(([name]) => name === file).length;
+      // Before the corpus-cache fix, each of these 4 calls independently
+      // re-read the whole file -- 4 reads instead of 1.
+      expect(countFor('chunks.json')).toBe(1);
+      expect(countFor('vectors.bin')).toBe(1);
+
+      getFileHandleSpy.mockRestore();
+    });
+
+    it('forces a fresh read after repoAddBatch adds another document (cache correctly invalidated, not serving a stale doc range)', async () => {
+      const { docId: docA } = await repoAdd('r', { name: 'a', url: 'file:///a' }, ['alpha one'], [vec(8, 1)], { embedModel: 'local:minilm' });
+      await repoDocChunks('r', docA); // primes the cache at the pre-add revision
+
+      const { docId: docB } = await repoAdd('r', { name: 'b', url: 'file:///b' }, ['beta one'], [vec(8, 2)]);
+      // Without correct invalidation this could still see the pre-add cached
+      // corpus (wrong revision/chunkCount) and fail to find docB's range.
+      const chunksB = await repoDocChunks('r', docB);
+      expect(chunksB).toHaveLength(1);
+      expect(chunksB[0].text).toBe('beta one');
+
+      const vectorsB = await repoDocVectors('r', docB);
+      expect(vectorsB?.vectors.length).toBe(8);
+    });
   });
 
   it('increments corpus revisions after an add without deleting the existing graph/Studio outputs', async () => {

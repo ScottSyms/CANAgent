@@ -1,9 +1,10 @@
-// =============================================================================
 // Shared domain types used across the UI, the service worker, and the offscreen
 // document. Pure data shapes only — no behaviour — so both ends of the message
 // protocol agree on what they're exchanging. Persisted shapes (Settings,
 // SiteEntry, Skill, MemoryEntry) are also what Backup & Restore serializes.
 // =============================================================================
+
+import type { ProviderId } from './providerIds';
 
 export interface TabSummary {
   tabId: number;
@@ -234,6 +235,8 @@ export type PromptKey =
   | 'studioStudyGuide';
 
 export interface Settings {
+  /** Omit for the existing endpoint/API-key path; otherwise use a verified account provider for model calls. */
+  subscriptionProvider?: ProviderId;
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -409,6 +412,20 @@ export interface Settings {
    * even if a cloud profile is assigned to that role. Absent = off.
    */
   restrictBackgroundToLocal?: boolean;
+
+  // --- Subscription-provider connections (src/background/providers/) --------
+  // Client IDs for each provider's OAuth app. Absent = that provider's Connect
+  // button is disabled with a setup hint, exactly like graphClientId above.
+  // These are public-client identifiers (no client secret is ever configured
+  // or stored — every flow here is PKCE or device-flow), so storing them
+  // alongside apiKey is not a secrecy concern; they are not run through the
+  // encryption vault for that reason.
+  /** GitHub OAuth App client ID (Device Flow) used to connect a GitHub Copilot subscription. See docs/providers.md. */
+  githubCopilotClientId?: string;
+  /** GitLab instance base URL (e.g. a self-managed GitLab). Absent = https://gitlab.com. */
+  gitlabInstanceUrl?: string;
+  /** GitLab OAuth Application client ID (Authorization Code + PKCE) for GitLab Duo. See docs/providers.md. */
+  gitlabDuoClientId?: string;
 }
 
 /**
@@ -439,6 +456,8 @@ export interface ModelProfile {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Omit for endpoint/API-key transport; blocked providers are rejected by the background registry. */
+  subscriptionProvider?: ProviderId;
   /** Wire protocol this profile's baseUrl speaks. Absent = 'chat-completions' (today's behavior). */
   protocol?: ModelProtocol;
   apiVersion?: string;

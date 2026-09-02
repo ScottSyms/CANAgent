@@ -1,0 +1,9 @@
+{
+  "name": "com.canchat.github_copilot_host",
+  "description": "CANChat Agent companion for the GitHub Copilot SDK",
+  "path": "REPLACE_WITH_ABSOLUTE_PATH_TO/host.mjs",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://REPLACE_WITH_YOUR_EXTENSION_ID/"
+  ]
+}

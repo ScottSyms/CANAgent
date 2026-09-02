@@ -47,6 +47,7 @@ import {
   repoGraphGetRaw,
   repoGraphSnapshot,
   repoGraphSet,
+  repoIngestLocalBatch,
   repoList,
   repoNotebookGet,
   repoNotebookSample,
@@ -228,6 +229,8 @@ async function handleRepo(req: RepoRequest): Promise<RepoResponse> {
         };
       case 'addBatch':
         return { ok: true, result: await repoAddBatch(req.repo, req.docs, { embedModel: req.embedModel, kind: req.kind }) };
+      case 'ingestLocalBatch':
+        return { ok: true, result: await repoIngestLocalBatch(req.repo, req.docs, { model: req.model, kind: req.kind }) };
       case 'search':
         return {
           ok: true,

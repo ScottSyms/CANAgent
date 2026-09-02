@@ -50,20 +50,12 @@ import {
   type GraphBuildInstantProgress,
   type GraphBuildProgress,
 } from './graphExtract';
+import { graphBuilding, graphBuildProgress } from './graphBuildState';
 import { generateStudioOutput } from './studioOutputs';
 import { studioGet } from './offscreenClient';
 import { resolveSentenceCitations } from './sentenceResolve';
 import type { NotebookOverview } from '../shared/types';
 import type { DocGraph } from '../shared/docGraph';
-
-// Repos with a graph build currently in flight (in-memory; lost on SW eviction,
-// after which a build resumes from the checkpointed graph on the next request).
-const graphBuilding = new Map<string, AbortController>();
-// Latest in-flight progress per repo (in-memory, same lifetime as
-// graphBuilding) — the build functions' onProgress callbacks write here so
-// notebook_graph_get can report live stage/doc progress to the UI's poll,
-// instead of only what's been checkpointed to graph.json so far.
-const graphBuildProgress = new Map<string, GraphBuildBackboneProgress | GraphBuildProgress | GraphBuildInstantProgress>();
 import { ingestFilesBatch } from './repoIngest';
 import { indexMailbox, type MailSyncProgress } from './mailIngest';
 import {
@@ -73,6 +65,9 @@ import {
   type SharePointSyncProgress,
 } from './sharepointIngest';
 import { connectMailbox, disconnectMailbox, isMailboxConnected } from './graphAuth';
+import { getProvider, listProviderDescriptors } from './providers/registry';
+import { isProviderId } from '../shared/providerIds';
+import { redact } from './providers/redact';
 import { cancelScheduledTask, getScheduledRuns, getScheduledTasks, reconcileScheduledAlarms, runScheduledTaskById, setScheduledTaskEnabled, taskIdFromAlarm, updateScheduledTask } from './scheduler';
 import { cancelJob, jobIdFromAlarm, pauseJob, reconcileJobs, resumeJob, tick } from './jobEngine';
 import { deleteJob } from './jobStore';
@@ -106,6 +101,7 @@ import { applyDecay, MEMORY_NODE_CAP, pruneGraph } from '../shared/memoryGraph';
 import { memoryIndexRemove, memoryIndexUpsert } from './memoryIndex';
 import { getVaultState, vaultDecrypt, vaultEncrypt } from './vault';
 import { withSwKeepalive } from './swKeepalive';
+import { isTrustedExtensionSender } from '../shared/messageValidation';
 
 // ----- Mailbox auto-refresh (chrome.alarms, opt-in) -----
 //
@@ -296,19 +292,28 @@ function broadcastNotice(text: string): void {
 // by whichever panel is open.
 const runtime = new AgentRuntime(broadcast);
 
-// The service worker may have just been revived after eviction. If a task was
-// cut off mid-run, restore its thread and working state from the in-flight
-// checkpoint so a reconnecting panel repaints it (see AgentRuntime.recoverInFlight).
-void runtime.recoverInFlight();
+// The service worker may have just been revived after eviction. Restore the
+// in-flight checkpoint (if a task was cut off) or the last idle conversation
+// so the panel doesn't appear to have "switched to a new chat".
+const runtimeReady: Promise<void> = runtime.recoverInFlight().catch(() => {});
+// Also fan the restored state to any ports that connect after the promise
+void runtimeReady.then(() => {
+  if (ports.size > 0) broadcast(runtime.fullState());
+});
 
-// A panel connects: register its port, immediately replay the full current
-// state (so a reconnecting panel re-paints), then translate each command into a
-// runtime method call. This switch is the authoritative list of actions the UI
-// can trigger.
+// A panel connects: register its port, replay the full current state once the
+// runtime has finished restoring (so a reconnect after eviction repaints the
+// transcript instead of an empty pane), then translate commands.
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'sidebar') return;
   ports.add(port);
-  port.postMessage(runtime.fullState());
+  void runtimeReady.then(() => {
+    try {
+      port.postMessage(runtime.fullState());
+    } catch {
+      ports.delete(port);
+    }
+  });
 
   port.onMessage.addListener((command: SidebarCommand) => {
     switch (command.type) {
@@ -390,7 +395,13 @@ chrome.runtime.onConnect.addListener((port) => {
         void runtime.captureToRepo(command.repo, command.scope);
         break;
       case 'get_state':
-        port.postMessage(runtime.fullState());
+        void runtimeReady.then(() => {
+          try {
+            port.postMessage(runtime.fullState());
+          } catch {
+            ports.delete(port);
+          }
+        });
         break;
       case 'ping':
         // Keepalive: each port message resets the service worker idle timer.
@@ -405,7 +416,26 @@ chrome.runtime.onConnect.addListener((port) => {
 // settings screen's "test connection", voice transcription, and repository
 // management. Each handler returns `true` to keep the message channel open for
 // the async `sendResponse` (a Chrome messaging requirement).
-chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((request: RuntimeRequest, sender, sendResponse) => {
+  if (!request || typeof request !== 'object' || typeof request.type !== 'string') {
+    sendResponse({ ok: false, error: 'Invalid extension request.' });
+    return false;
+  }
+  const isProviderRequest = request.type.startsWith('provider_');
+  if (isProviderRequest) {
+    if (!isTrustedExtensionSender(sender, chrome.runtime.getURL(''))) {
+      sendResponse({ ok: false, error: 'Provider operations are restricted to CANChat extension pages.' });
+      return false;
+    }
+    if (request.type !== 'provider_list' && !isProviderId('provider' in request ? request.provider : undefined)) {
+      sendResponse({ ok: false, error: 'Unknown provider.' });
+      return false;
+    }
+  }
+  const providerError = (error: unknown) => ({
+    ok: false,
+    error: redact(error instanceof Error ? error.message : String(error)),
+  });
   if (request.type === 'stop_task') {
     runtime.stop();
     sendResponse({ ok: true });
@@ -622,6 +652,68 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, _sender, sendResp
   }
   if (request.type === 'mailbox_disconnect') {
     disconnectMailbox().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (request.type === 'provider_list') {
+    sendResponse({ ok: true, providers: listProviderDescriptors() });
+    return true;
+  }
+  if (request.type === 'provider_connect') {
+    // Only ever reached from a user click (the Connect button), satisfying
+    // chrome.identity's/RFC 8628's interactive-flow requirement.
+    getProvider(request.provider)
+      .connect()
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((e) => sendResponse(providerError(e)));
+    return true;
+  }
+  if (request.type === 'provider_complete_oauth') {
+    getProvider(request.provider)
+      .completeOAuthCallback()
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse(providerError(e)));
+    return true;
+  }
+  if (request.type === 'provider_disconnect') {
+    getProvider(request.provider)
+      .disconnect()
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse(providerError(e)));
+    return true;
+  }
+  if (request.type === 'provider_status') {
+    getProvider(request.provider)
+      .getConnectionStatus()
+      .then((status) => sendResponse({ ok: true, status }))
+      .catch((e) => sendResponse(providerError(e)));
+    return true;
+  }
+  if (request.type === 'provider_account') {
+    getProvider(request.provider)
+      .getAccountInfo()
+      .then((account) => sendResponse({ ok: true, account }))
+      .catch((e) => sendResponse(providerError(e)));
+    return true;
+  }
+  if (request.type === 'provider_models') {
+    getProvider(request.provider)
+      .listModels()
+      .then((models) => sendResponse({ ok: true, models }))
+      .catch((e) => sendResponse(providerError(e)));
+    return true;
+  }
+  if (request.type === 'provider_quota') {
+    getProvider(request.provider)
+      .getQuotaStatus()
+      .then((quota) => sendResponse({ ok: true, quota }))
+      .catch((e) => sendResponse(providerError(e)));
+    return true;
+  }
+  if (request.type === 'provider_refresh') {
+    getProvider(request.provider)
+      .refreshAuthentication()
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse(providerError(e)));
     return true;
   }
   if (request.type === 'sharepoint_session') {
