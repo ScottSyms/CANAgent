@@ -1,0 +1,17 @@
+{
+  "name": "canchat-codex-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native-messaging host bridging CANChat Agent to the official Codex app-server.",
+  "type": "module",
+  "main": "host.mjs",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@openai/codex": "^0.149.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -90,10 +90,14 @@ interface ChunkRec {
 interface RepoSearchData {
   revision: number;
   chunkCount: number;
-  meta: RepoMeta;
   vectors: Int8Array;
   chunks: ReturnType<typeof enrichChunks>;
-  keywordIndex: KeywordIndex;
+  /**
+   * Lazily-loaded BM25 index. `undefined` = not yet attempted. `repoSearch`
+   * is the only caller that needs this — `repoDocChunks`/`repoDocVectors`
+   * never touch it, so a doc-scoped read never pays to build/read it.
+   */
+  keywordIndex?: KeywordIndex;
   /**
    * Lazily-loaded graph for this corpus revision. `undefined` = not yet
    * attempted; `null` = attempted and there is no (or a stale) graph. Once
@@ -114,6 +118,34 @@ function cacheSearchData(repo: string, data: RepoSearchData): void {
     if (!oldest) break;
     searchDataCache.delete(oldest);
   }
+}
+
+/**
+ * The shared source of truth for a repo's decrypted `chunks.json`/
+ * `vectors.bin` content at its current corpus revision — read/decrypted from
+ * OPFS at most once per revision, then reused by every caller (`repoSearch`,
+ * `repoDocChunks`, `repoDocVectors`) until the corpus changes. Before this,
+ * the two doc-scoped readers independently re-read + re-decrypted the WHOLE
+ * corpus on every single call with no caching at all — a real cost when
+ * a graph build calls either once per document in a loop (see
+ * `buildRepoGraph`/`runNerBackbone` in graphExtract.ts): a D-document build
+ * did D full-corpus reads instead of one.
+ *
+ * `meta.json` is always read fresh by the caller before this is invoked — it
+ * IS the staleness signal a cache hit is checked against (revision +
+ * chunkCount), so it can't itself be cached around; it's also small and
+ * plaintext, so re-reading it is cheap.
+ */
+async function getCorpusData(dir: FileSystemDirectoryHandle, repo: string, meta: RepoMeta): Promise<RepoSearchData> {
+  const revision = corpusRevision(meta);
+  let cached = searchDataCache.get(repo);
+  if (!cached || cached.revision !== revision || cached.chunkCount !== meta.chunkCount) {
+    const vectors = await readVectors(dir);
+    const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
+    cached = { revision, chunkCount: meta.chunkCount, vectors, chunks: enrichChunks(meta, chunks) };
+  }
+  cacheSearchData(repo, cached); // inserts on a miss, refreshes LRU order on a hit
+  return cached;
 }
 
 /**
@@ -220,7 +252,7 @@ async function writeVectors(dir: FileSystemDirectoryHandle, data: Int8Array): Pr
   await w.close();
 }
 
-async function readOrBuildKeywordIndex(dir: FileSystemDirectoryHandle, chunks: ChunkRec[]): Promise<KeywordIndex> {
+async function readOrBuildKeywordIndex(dir: FileSystemDirectoryHandle, chunks: Array<{ text: string }>): Promise<KeywordIndex> {
   const existing = await readJson<KeywordIndex | null>(dir, 'keywordIndex.json', null);
   if (existing?.version === 1 && existing.docLen.length === chunks.length) return existing;
   const rebuilt = buildKeywordIndex(chunks);
@@ -394,6 +426,72 @@ export async function repoAdd(
   return { docId: result.docId, chunkCount: result.chunkCount };
 }
 
+export interface RepoIngestLocalDoc {
+  doc: { name: string; url: string };
+  chunks: string[];
+  docExtra?: DocExtra;
+  docId?: string;
+}
+
+/**
+ * Fused local-embedder ingest: embed every document's chunks — one flat
+ * `embedTextsLocal` call across the whole batch, so document boundaries don't
+ * reset the model's fixed inference batch (mirrors `flattenForEmbedding` in
+ * repoIngest.ts) — then persist via the existing `repoAddBatch`, all inside
+ * one offscreen-side function call. Replaces two separate service-worker
+ * ↔ offscreen round trips (an `embed_local` message returning `number[][]`
+ * to the service worker, then a second `add`/`addBatch` message sending
+ * those same vectors back into this offscreen document) with one: the
+ * service worker sends chunk text in, and gets back only the small
+ * `RepoAddResult[]` — no bulk float vectors cross the message channel at all.
+ *
+ * Local embedder only. The external-provider path is an HTTP call the
+ * service worker makes directly (`llmProvider.ts`'s `embed()`) with no
+ * offscreen counterpart to fuse with — callers must keep routing that
+ * through `embedChunks()` + `repoAdd`/`repoAddBatch` exactly as before; this
+ * is an additional, parallel op, not a replacement of those.
+ *
+ * `localEmbed.ts` is imported dynamically (not at module top) for the same
+ * reason `offscreen.ts`'s `embed_local` handler already does — `repoStore.ts`
+ * is imported eagerly by `offscreen.ts`, and a static import here would pull
+ * the model runtime into the offscreen bundle's startup path.
+ */
+export async function repoIngestLocalBatch(
+  repo: string,
+  docs: RepoIngestLocalDoc[],
+  opts: { model?: string; kind?: RepoKind } = {},
+): Promise<RepoAddResult[]> {
+  if (docs.length === 0) return [];
+  const ranges: Array<{ start: number; count: number }> = [];
+  const flatChunks: string[] = [];
+  for (const d of docs) {
+    ranges.push({ start: flatChunks.length, count: d.chunks.length });
+    flatChunks.push(...d.chunks);
+  }
+
+  const { embedTextsLocal, DEFAULT_LOCAL_MODEL } = await import('./localEmbed');
+  const model = opts.model || DEFAULT_LOCAL_MODEL;
+  let flatVectors: number[][];
+  try {
+    ({ vectors: flatVectors } = await embedTextsLocal(flatChunks, model));
+  } catch (e) {
+    const error = `repoIngestLocalBatch: local embedding failed: ${e instanceof Error ? e.message : String(e)}`;
+    return docs.map(() => ({ ok: false, error }));
+  }
+
+  const withVectors: RepoAddDoc[] = docs.map((d, i) => ({
+    doc: d.doc,
+    chunks: d.chunks,
+    vectors: flatVectors.slice(ranges[i].start, ranges[i].start + ranges[i].count),
+    docExtra: d.docExtra,
+    docId: d.docId,
+  }));
+  // embedModel stamped identically to embedChunks()+repoAddBatch's local path
+  // (llmProvider.ts's embedderId(): `local:${model}`) — same model-lock value
+  // either route produces, so a later Full build/re-index sees no difference.
+  return repoAddBatch(repo, withVectors, { embedModel: `local:${model}`, kind: opts.kind });
+}
+
 export async function repoSearch(
   repo: string,
   queryVector: number[],
@@ -421,17 +519,9 @@ export async function repoSearch(
       `Repo "${repo}" was built with embedder "${meta.embedModel}" but the query used "${embedModel}". Re-index the repo (or switch the embedder back) to search it.`,
     );
   }
-  const revision = corpusRevision(meta);
-  let cached = searchDataCache.get(repo);
-  if (!cached || cached.revision !== revision || cached.chunkCount !== meta.chunkCount) {
-    const vectors = await readVectors(dir);
-    const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
-    const keywordIndex = await readOrBuildKeywordIndex(dir, chunks);
-    cached = { revision, chunkCount: meta.chunkCount, meta, vectors, chunks: enrichChunks(meta, chunks), keywordIndex };
-    cacheSearchData(repo, cached);
-  } else {
-    // Refresh LRU order on use.
-    cacheSearchData(repo, cached);
+  const cached = await getCorpusData(dir, repo, meta);
+  if (cached.keywordIndex === undefined) {
+    cached.keywordIndex = await readOrBuildKeywordIndex(dir, cached.chunks);
   }
   const { vectors, chunks: enrichedChunks, keywordIndex } = cached;
   const base = {
@@ -442,6 +532,17 @@ export async function repoSearch(
     // Attach chunkId + sentence spans so hits carry provenance to the agent.
     chunks: enrichedChunks,
     k,
+    // The local embedder's traced model graph already L2-normalizes its own
+    // output (see vectorSearch.ts's SearchParams.queryAlreadyNormalized doc
+    // comment) — skip scoreVectors' redundant renormalize for it. Every
+    // caller's queryVector(s) — single or multi-query (agentRuntime.ts's
+    // graph-assisted expansion embeds each query individually via
+    // `embedChunks`, never averages/composites them) — share the repo's
+    // locked embedder identity by the time execution reaches here: the
+    // model-lock check above already rejected any mismatched `embedModel`.
+    // Never set for an external provider, whose normalization guarantee is
+    // unknown.
+    queryAlreadyNormalized: meta.embedModel?.startsWith('local:') === true,
   };
   // Hybrid (semantic + BM25, RRF-fused) when enabled and the raw query is known;
   // otherwise pure semantic. The query text is only present on the hybrid path.
@@ -797,8 +898,8 @@ export async function repoDocChunks(
   if (!meta) return [];
   const doc = meta.docs.find((d) => d.id === docId);
   if (!doc) return [];
-  const chunks = await readJson<ChunkRec[]>(dir, 'chunks.json', []);
-  return enrichChunks(meta, chunks)
+  const { chunks } = await getCorpusData(dir, repo, meta);
+  return chunks
     .slice(doc.chunkStart, doc.chunkStart + doc.chunkCount)
     .map((c) => ({ chunkId: c.chunkId ?? '', text: c.text, sentences: c.sentences ?? [] }));
 }
@@ -821,7 +922,7 @@ export async function repoDocVectors(
   const doc = meta.docs.find((d) => d.id === docId);
   if (!doc) return null;
   const dim = meta.dim;
-  const vecs = await readVectors(dir);
+  const { vectors: vecs } = await getCorpusData(dir, repo, meta);
   const start = doc.chunkStart * dim;
   const end = (doc.chunkStart + doc.chunkCount) * dim;
   return { vectors: vecs.subarray(start, end), dim, perDimScale: meta.perDimScale };

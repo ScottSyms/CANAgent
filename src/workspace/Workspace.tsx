@@ -8,6 +8,7 @@ import { AutomationsPage } from './AutomationsPage';
 import { ConsoleSettingsPage } from './ConsoleSettingsPage';
 import { ModelProfilesSection } from './ModelProfilesSection';
 import { ModelSection } from './ModelSection';
+import { ProvidersSection } from './ProvidersSection';
 import { VaultSection } from './VaultSection';
 import { AdvancedSettingsSection } from './AdvancedSettingsSection';
 import { DataViewer } from './DataViewer';
@@ -113,6 +114,7 @@ export function Workspace() {
             <VaultSection />
             <AdvancedSettingsSection />
             <ModelProfilesSection />
+            <ProvidersSection />
           </div>
         );
       case 'memory':

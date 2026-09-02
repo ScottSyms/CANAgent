@@ -8,14 +8,16 @@
 // "+ Tab / + Group" buttons.
 // =============================================================================
 
+import { runWithConcurrency } from '../shared/asyncPool';
 import { chunkText } from '../shared/repoChunk';
 import type { RepoKind, UploadFile } from '../shared/messages';
-import type { Settings } from '../shared/types';
+import { DEFAULT_LOCAL_EMBED_MODEL, type Settings } from '../shared/types';
 import { resolveOfficeUrl, resolvePdfUrl } from '../shared/url';
 import * as browser from './browserToolAdapter';
 import { captureFullPage } from './fullPageCapture';
+import { scheduleInstantGraphRefresh } from './graphExtract';
 import { complete, embedChunks, embedderId, resolveModelForRole, type ContentPart } from './llmProvider';
-import { extractOffice, extractPdf, repoAdd, repoAddBatch } from './offscreenClient';
+import { extractOffice, extractPdf, repoAdd, repoAddBatch, repoIngestLocalBatch } from './offscreenClient';
 
 // OCR fallback: screenshot the whole (active) tab and have the vision model
 // transcribe it. Only works for the active tab (captureVisibleTab limitation).
@@ -100,23 +102,14 @@ export async function ingestTab(
   return storeText(settings, repo, title || url, url, text);
 }
 
-/** Chunk + embed text, without storing it — the shared prep step for both the
- * single-document (`storeText`) and batched (`ingestFilesBatch`) store paths. */
-async function prepareTextDoc(
-  settings: Settings,
-  text: string,
-): Promise<{ ok: true; chunks: string[]; vectors: number[][] } | { ok: false; error: string }> {
-  const chunks = chunkText(text);
-  if (chunks.length === 0) return { ok: false, error: 'No chunks produced.' };
-  try {
-    const vectors = await embedChunks(settings, chunks);
-    return { ok: true, chunks, vectors };
-  } catch (e) {
-    return { ok: false, error: String(e) };
-  }
-}
-
-/** Chunk → embed → store text as a repo document. Shared by tab and file ingestion. */
+/**
+ * Chunk → embed → store text as a repo document. Shared by tab and file
+ * ingestion. Local embedder: routes through the fused `repoIngestLocalBatch`
+ * offscreen op (embed + store in one round trip — see its own doc comment in
+ * repoStore.ts). External provider: unchanged — `embedChunks`'s HTTP call
+ * has no offscreen counterpart to fuse with, so it stays a separate
+ * embed-then-`repoAdd` sequence.
+ */
 export async function storeText(
   settings: Settings,
   repo: string,
@@ -125,15 +118,34 @@ export async function storeText(
   text: string,
   opts: { kind?: RepoKind; docExtra?: { path?: string; mtime?: number; size?: number } } = {},
 ): Promise<IngestResult> {
-  const prepared = await prepareTextDoc(settings, text);
-  if (!prepared.ok) return prepared;
-  const res = await repoAdd(repo, { name, url }, prepared.chunks, prepared.vectors, {
+  const chunks = chunkText(text);
+  if (chunks.length === 0) return { ok: false, error: 'No chunks produced.' };
+
+  if (settings.embedder !== 'external') {
+    const model = settings.localEmbedModel || DEFAULT_LOCAL_EMBED_MODEL;
+    const res = await repoIngestLocalBatch(repo, [{ doc: { name, url }, chunks, docExtra: opts.docExtra }], { model, kind: opts.kind });
+    const outcome = res.ok ? (res.result as Array<{ ok: true; docId: string; chunkCount: number } | { ok: false; error: string }> | undefined)?.[0] : undefined;
+    if (!res.ok || !outcome?.ok) {
+      return { ok: false, error: (!res.ok ? res.error : outcome && !outcome.ok ? outcome.error : undefined) ?? 'Batch store failed.' };
+    }
+    scheduleInstantGraphRefresh(repo); // fire-and-forget: free topic graph ready before the user asks for it
+    return { ok: true, chunks: chunks.length };
+  }
+
+  let vectors: number[][];
+  try {
+    vectors = await embedChunks(settings, chunks);
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+  const res = await repoAdd(repo, { name, url }, chunks, vectors, {
     embedModel: embedderId(settings),
     kind: opts.kind,
     docExtra: opts.docExtra,
   });
   if (!res.ok) return { ok: false, error: res.error };
-  return { ok: true, chunks: prepared.chunks.length };
+  scheduleInstantGraphRefresh(repo); // fire-and-forget: free topic graph ready before the user asks for it
+  return { ok: true, chunks: chunks.length };
 }
 
 /** The text-extraction ladder shared by `ingestFile` and `ingestFilesBatch`: use the
@@ -182,46 +194,56 @@ export async function ingestFile(
 }
 
 /**
- * Concurrency cap for per-file extract+embed work in `ingestFilesBatch`. High
- * enough to overlap PDF/Office extraction (CPU/worker-bound) with embedding
- * (WASM/GPU-bound) across files; low enough that a folder of hundreds of large
- * docs doesn't hold that many chunk/vector arrays in memory at once or flood
- * the single embedding pipeline with concurrent large-document requests.
+ * Concurrency cap for per-file extract+chunk work in `ingestFilesBatch`
+ * (embedding itself runs once, afterward, for the whole batch — see
+ * `flattenForEmbedding`). High enough to overlap PDF/Office extraction
+ * (CPU/worker-bound) across files; low enough that a folder of hundreds of
+ * large docs doesn't hold that many chunk arrays in memory at once.
  */
 const FILE_INGEST_CONCURRENCY = 4;
 
 /**
- * Run `fn` over `items` with at most `limit` in flight at once, as a rolling
- * pool — each of `limit` workers pulls the next unclaimed item as soon as it
- * finishes its current one, rather than waiting for a whole fixed-size batch
- * to settle before starting the next (which would idle freed slots behind a
- * single slow item). Callers write their own results (e.g. into an outer
- * array by index) from within `fn`, so this doesn't collect return values.
+ * Concatenate every entry's chunks into one flat array for a single
+ * `embedChunks` call, plus the `{start, count}` range each entry's own chunks
+ * land at within it — the map `unflattenVectors` uses to slice the returned
+ * vectors back apart afterward. Document boundaries must not reset the local
+ * embedder's fixed-size inference batch (`EMBED_BATCH` in localEmbed.ts):
+ * embedding each document with its own `embedChunks` call means a folder of
+ * many small files each pay for their own mostly-padded last batch instead of
+ * packing rows from different documents into the same batch together.
  */
-async function runWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
-  let next = 0;
-  async function worker(): Promise<void> {
-    while (next < items.length) {
-      const item = items[next++];
-      await fn(item);
-    }
+export function flattenForEmbedding<T extends { chunks: string[] }>(
+  entries: readonly T[],
+): { flatChunks: string[]; ranges: Array<{ start: number; count: number }> } {
+  const flatChunks: string[] = [];
+  const ranges: Array<{ start: number; count: number }> = [];
+  for (const entry of entries) {
+    ranges.push({ start: flatChunks.length, count: entry.chunks.length });
+    flatChunks.push(...entry.chunks);
   }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return { flatChunks, ranges };
+}
+
+/** Inverse of `flattenForEmbedding`: slice one flat `vectors[]` back into each range's own vectors, index-aligned with the `entries`/`ranges` that produced it. */
+export function unflattenVectors(vectors: number[][], ranges: Array<{ start: number; count: number }>): number[][][] {
+  return ranges.map(({ start, count }) => vectors.slice(start, start + count));
 }
 
 /**
  * Ingest several uploaded files into a repository with a single store write:
- * each file is extracted + chunked + embedded individually (unavoidable —
- * different text, different embedding calls), but instead of calling
- * `repoAdd` once per file (an O(N²) sequence of full chunks.json/keyword-index
- * rewrites over a folder sync, see repoStore.repoAddBatch), every successfully
- * prepared file is stored in one `repoAddBatch` call. Returns one `IngestResult`
- * per input file, in the same order.
+ * every file is extracted + chunked concurrently (unavoidable — different
+ * text), but instead of calling `repoAdd` once per file (an O(N²) sequence of
+ * full chunks.json/keyword-index rewrites over a folder sync, see
+ * repoStore.repoAddBatch) or embedding each file independently (under-filling
+ * the embedder's fixed batch size on small files — see flattenForEmbedding),
+ * every successfully-extracted file's chunks are embedded in ONE global
+ * `embedChunks` call, then stored in one `repoAddBatch` call. Returns one
+ * `IngestResult` per input file, in the same order.
  *
- * Extraction + embedding for each file runs concurrently (capped at
- * `FILE_INGEST_CONCURRENCY`) instead of one file at a time, since neither step
- * depends on another file's result — only the final `repoAddBatch` write needs
- * to wait for all of them.
+ * Extraction for each file runs concurrently (capped at
+ * `FILE_INGEST_CONCURRENCY`) since it doesn't depend on another file's
+ * result; embedding then runs once for the whole batch, and the final
+ * `repoAddBatch` write waits for that.
  */
 export async function ingestFilesBatch(
   settings: Settings,
@@ -230,7 +252,7 @@ export async function ingestFilesBatch(
   repoKind: RepoKind = 'page',
 ): Promise<IngestResult[]> {
   const results = new Array<IngestResult>(files.length);
-  const batchEntries: Array<{ index: number; doc: { name: string; url: string }; chunks: string[]; vectors: number[][]; docExtra: { path?: string; mtime?: number; size?: number } }> = [];
+  const prepared: Array<{ index: number; doc: { name: string; url: string }; chunks: string[]; docExtra: { path?: string; mtime?: number; size?: number } }> = [];
 
   await runWithConcurrency(
     files.map((file, index) => ({ file, index })),
@@ -241,38 +263,78 @@ export async function ingestFilesBatch(
         results[index] = extracted;
         return;
       }
-      const prepared = await prepareTextDoc(settings, extracted.text);
-      if (!prepared.ok) {
-        results[index] = prepared;
+      const chunks = chunkText(extracted.text);
+      if (chunks.length === 0) {
+        results[index] = { ok: false, error: 'No chunks produced.' };
         return;
       }
       const path = file.path;
-      batchEntries.push({
+      prepared.push({
         index,
         doc: { name: path || file.name, url: `file:///${path || file.name}` },
-        chunks: prepared.chunks,
-        vectors: prepared.vectors,
+        chunks,
         docExtra: { path, mtime: file.mtime, size: file.size },
       });
     },
   );
 
-  if (batchEntries.length > 0) {
-    const res = await repoAddBatch(
+  if (prepared.length === 0) return results;
+
+  // Local embedder: the fused offscreen op does its own flatten-then-embed
+  // internally (repoStore.repoIngestLocalBatch), so no local flatten/embed
+  // step is needed here at all — just hand it every prepared file's chunks.
+  if (settings.embedder !== 'external') {
+    const model = settings.localEmbedModel || DEFAULT_LOCAL_EMBED_MODEL;
+    const res = await repoIngestLocalBatch(
       repo,
-      batchEntries.map((e) => ({ doc: e.doc, chunks: e.chunks, vectors: e.vectors, docExtra: e.docExtra })),
-      { embedModel: embedderId(settings), kind: repoKind },
+      prepared.map((e) => ({ doc: e.doc, chunks: e.chunks, docExtra: e.docExtra })),
+      { model, kind: repoKind },
     );
-    const outcomes = res.ok && Array.isArray(res.result) ? (res.result as Array<{ ok: true; docId: string; chunkCount: number } | { ok: false; error: string }>) : null;
-    batchEntries.forEach((entry, j) => {
-      if (!res.ok) {
-        results[entry.index] = { ok: false, error: res.error ?? 'Batch store failed.' };
-        return;
-      }
-      const outcome = outcomes?.[j];
-      results[entry.index] = outcome?.ok ? { ok: true, chunks: entry.chunks.length } : { ok: false, error: outcome && !outcome.ok ? outcome.error : 'Batch store failed.' };
-    });
+    applyBatchOutcomes(results, prepared, res);
+    if (res.ok) scheduleInstantGraphRefresh(repo); // fire-and-forget, once per batch (not per file)
+    return results;
   }
 
+  // External provider: embedChunks' HTTP call has no offscreen counterpart to
+  // fuse with, so this stays a separate flatten-then-embed-then-store sequence.
+  const { flatChunks, ranges } = flattenForEmbedding(prepared);
+  let vectorsByEntry: number[][][];
+  try {
+    vectorsByEntry = unflattenVectors(await embedChunks(settings, flatChunks), ranges);
+  } catch (e) {
+    // A single global embed call means one failure affects every file that
+    // reached this stage — degrade each to its own per-file error result
+    // rather than letting the whole batch throw/reject.
+    const error = String(e);
+    for (const entry of prepared) results[entry.index] = { ok: false, error };
+    return results;
+  }
+
+  const batchEntries = prepared.map((entry, i) => ({ ...entry, vectors: vectorsByEntry[i] }));
+  const res = await repoAddBatch(
+    repo,
+    batchEntries.map((e) => ({ doc: e.doc, chunks: e.chunks, vectors: e.vectors, docExtra: e.docExtra })),
+    { embedModel: embedderId(settings), kind: repoKind },
+  );
+  applyBatchOutcomes(results, batchEntries, res);
+  if (res.ok) scheduleInstantGraphRefresh(repo); // fire-and-forget, once per batch (not per file)
+
   return results;
+}
+
+/** Map a repoAddBatch/repoIngestLocalBatch RepoResponse back onto each entry's own IngestResult, by index. */
+function applyBatchOutcomes(
+  results: IngestResult[],
+  entries: Array<{ index: number; chunks: string[] }>,
+  res: { ok: boolean; error?: string; result?: unknown },
+): void {
+  const outcomes = res.ok && Array.isArray(res.result) ? (res.result as Array<{ ok: true; docId: string; chunkCount: number } | { ok: false; error: string }>) : null;
+  entries.forEach((entry, j) => {
+    if (!res.ok) {
+      results[entry.index] = { ok: false, error: res.error ?? 'Batch store failed.' };
+      return;
+    }
+    const outcome = outcomes?.[j];
+    results[entry.index] = outcome?.ok ? { ok: true, chunks: entry.chunks.length } : { ok: false, error: outcome && !outcome.ok ? outcome.error : 'Batch store failed.' };
+  });
 }

@@ -271,12 +271,17 @@ export const ChatPanel = memo(function ChatPanel({
 
   const getEditorText = () =>
     (editorRef.current?.innerText ?? '').replace(/\u00a0/g, ' ');
-  const syncText = () => setText(getEditorText());
+  const syncText = () => {
+    const v = getEditorText();
+    setText(v);
+    persistDraft(v);
+  };
   const setEditorText = (value: string) => {
     const el = editorRef.current;
     if (!el) return;
     el.textContent = value;
     setText(value);
+    persistDraft(value);
     // caret to end
     const range = document.createRange();
     range.selectNodeContents(el);
@@ -291,7 +296,28 @@ export const ChatPanel = memo(function ChatPanel({
     setText('');
     setMention(null);
     setMentionItems([]);
+    // Clear persisted draft — user sent or discarded it
+    void chrome.storage.local.remove('ba_composer_draft');
   };
+  // Persist unsent composer text so it survives SW eviction / panel reload.
+  const draftSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const persistDraft = (value: string) => {
+    if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current);
+    draftSaveTimer.current = setTimeout(() => {
+      const v = value.trim();
+      if (v) void chrome.storage.local.set({ ba_composer_draft: value });
+      else void chrome.storage.local.remove('ba_composer_draft');
+    }, 300);
+  };
+
+  // Restore draft on mount (survives idle eviction).
+  useEffect(() => {
+    chrome.storage.local.get('ba_composer_draft').then((r) => {
+      const d = r.ba_composer_draft as string | undefined;
+      if (d && d.trim() && !getEditorText().trim()) setEditorText(d);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // After an undo, drop the removed prompt back into the composer for editing.
   useEffect(() => {

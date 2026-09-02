@@ -28,6 +28,9 @@ import type { NerSpan } from './nerAggregate';
 import type { EventTrigger } from './eventTriggers';
 import type { ScheduledTaskRecurrence } from './scheduledTasks';
 import type { Workflow } from './workflows';
+import type { ProviderId } from './providerIds';
+
+export type { ProviderId };
 
 /** Commands sent from the sidebar to the background over a long-lived port. */
 export type SidebarCommand =
@@ -219,7 +222,20 @@ export type RuntimeRequest =
   | { type: 'product_get'; id: string }
   | { type: 'product_delete'; id: string }
   | { type: 'products_export' }
-  | { type: 'products_import'; products: ExportedProduct[] };
+  | { type: 'products_import'; products: ExportedProduct[] }
+  // Subscription-provider connections (src/background/providers/) — GitHub
+  // Copilot, GitLab Duo, ChatGPT/Codex, xAI/SuperGrok. One handler per verb,
+  // dispatched by provider id in the service worker so this stays a thin,
+  // provider-agnostic routing layer (see providers/registry.ts).
+  | { type: 'provider_list' }
+  | { type: 'provider_connect'; provider: ProviderId }
+  | { type: 'provider_complete_oauth'; provider: ProviderId }
+  | { type: 'provider_disconnect'; provider: ProviderId }
+  | { type: 'provider_status'; provider: ProviderId }
+  | { type: 'provider_account'; provider: ProviderId }
+  | { type: 'provider_models'; provider: ProviderId }
+  | { type: 'provider_quota'; provider: ProviderId }
+  | { type: 'provider_refresh'; provider: ProviderId };
 
 /** One picked file on its way into a repository (see shared/uploadFile.ts). */
 export interface UploadFile {
@@ -456,6 +472,27 @@ export type RepoRequest =
         docId?: string;
       }>;
       embedModel?: string;
+      kind?: RepoKind;
+    }
+  // Fused local-embedder ingest: embed + normalize/quantize + persist inside
+  // ONE offscreen-side call, instead of two round trips (an `embed_local`
+  // message returning number[][] to the service worker, then a second
+  // `add`/`addBatch` message sending those same vectors back). Chunks only —
+  // no `vectors` field, since embedding happens on the offscreen side.
+  // Local embedder only: the external-provider path has no offscreen
+  // counterpart and keeps using `add`/`addBatch`, unchanged.
+  | {
+      target: 'offscreen-repo';
+      op: 'ingestLocalBatch';
+      repo: string;
+      docs: Array<{
+        doc: { name: string; url: string };
+        chunks: string[];
+        docExtra?: { path?: string; mtime?: number; size?: number };
+        docId?: string;
+      }>;
+      /** Raw local-embedder model id (no `local:` prefix) — absent = the offscreen default. */
+      model?: string;
       kind?: RepoKind;
     }
   | {

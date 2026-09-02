@@ -1,0 +1,14 @@
+{
+  "name": "canchat-github-copilot-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reference native-messaging host bridging CANChat Agent to the official GitHub Copilot SDK.",
+  "type": "module",
+  "main": "host.mjs",
+  "scripts": {
+    "test": "node --test host.test.mjs"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "^1.0.0"
+  }
+}

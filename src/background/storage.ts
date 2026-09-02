@@ -45,6 +45,7 @@ export const LESSON_MAX_ENTRIES = 50;
 export const CONVERSATION_INDEX_KEY = 'ba_conv_index';
 export const CONVERSATION_KEY_PREFIX = 'ba_conv_';
 export const CONVERSATION_LABELS_KEY = 'ba_conv_labels';
+export const ACTIVE_CONVERSATION_KEY = 'ba_active_conversation';
 export const MAX_SAVED_CONVERSATIONS = 100;
 
 /** Storage key for a conversation body. Index entries are keyed by id alone. */
@@ -94,7 +95,15 @@ export const OPTIONAL_SECRET_FIELDS = ['ideogramApiKey', 'embeddingApiKey', 'tra
 export async function getSettings(): Promise<Settings | null> {
   const result = await chrome.storage.local.get(SETTINGS_KEY);
   const settings = result[SETTINGS_KEY] as Settings | undefined;
-  if (!settings || !settings.baseUrl || !settings.apiKey || !settings.model) return null;
+  if (!settings || !settings.model) return null;
+  if (settings.subscriptionProvider) {
+    const out: Settings = { ...settings, apiKey: '' };
+    for (const f of OPTIONAL_SECRET_FIELDS) {
+      if (settings[f]) out[f] = (await vaultDecrypt(settings[f]!)) ?? undefined;
+    }
+    return out;
+  }
+  if (!settings.baseUrl || !settings.apiKey) return null;
   const apiKey = await vaultDecrypt(settings.apiKey);
   if (apiKey === null) return null; // encrypted but vault locked/erased
   const out: Settings = { ...settings, apiKey };
@@ -440,11 +449,24 @@ export async function deleteConversation(id: string): Promise<void> {
   await chrome.storage.local.remove(conversationKey(id));
 }
 
+/** The id of the conversation currently shown in the panel (restored after SW eviction). */
+export async function getActiveConversationId(): Promise<string | null> {
+  const r = await chrome.storage.local.get(ACTIVE_CONVERSATION_KEY);
+  const v = r[ACTIVE_CONVERSATION_KEY];
+  return typeof v === 'string' && v ? v : null;
+}
+
+export async function setActiveConversationId(id: string | null): Promise<void> {
+  if (id) await chrome.storage.local.set({ [ACTIVE_CONVERSATION_KEY]: id });
+  else await chrome.storage.local.remove(ACTIVE_CONVERSATION_KEY);
+}
+
 /** Remove every saved conversation: all body records and the index itself. */
 export async function clearAllConversations(): Promise<void> {
   const index = await getConversationIndexRaw();
   await chrome.storage.local.remove([
     CONVERSATION_INDEX_KEY,
+    ACTIVE_CONVERSATION_KEY,
     ...index.map((c) => conversationKey(c.id)),
   ]);
 }

@@ -154,6 +154,12 @@ export function Sidebar() {
   const [showHistory, setShowHistory] = useState(false);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [learnRecording, setLearnRecording] = useState(false);
+  // Preserve chat across SW eviction: an empty full_state delivered before the
+  // service worker finishes restoring looks like "switched to new chat". Keep a
+  // ref so the handler can avoid clobbering an existing transcript with that
+  // transient empty.
+  const messagesRef = useRef<ChatMessageView[]>([]);
+  const lastConnectAt = useRef(0);
   const [uiScale, setUiScale] = useState(() => {
     const s = Number(localStorage.getItem('ba_ui_scale'));
     return s >= 0.8 && s <= 1.6 ? s : 1;
@@ -182,9 +188,13 @@ export function Sidebar() {
   const clearPendingDrop = useCallback(() => setPendingDrop(null), []);
 
   useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
     chrome.storage.local.get('ba_settings').then((r) => {
       const s = r.ba_settings as Settings | undefined;
-      const ok = Boolean(s?.baseUrl && s?.apiKey && s?.model);
+      const ok = Boolean(s?.model && (s?.subscriptionProvider || (s?.baseUrl && s?.apiKey)));
       setConfigured(ok);
       if (!ok) setShowOnboarding(true);
     });
@@ -212,14 +222,31 @@ export function Sidebar() {
     const syncPing = (status: AgentStatus) => (status === 'idle' ? stopPing() : startPing());
 
     const connect = () => {
+      lastConnectAt.current = Date.now();
       port = chrome.runtime.connect({ name: 'sidebar' });
       portRef.current = port;
       port.onMessage.addListener((event: BackgroundEvent) => {
         switch (event.type) {
-          case 'full_state':
+          case 'full_state': {
             setErrorBanner(null);
             setStatus(event.status);
-            setMessages(event.messages);
+            // During the brief window after reconnect the SW may emit an empty
+            // state before restore completes. Don't wipe an existing transcript
+            // with that — the restored state will arrive shortly.
+            const isTransientEmpty =
+              event.messages.length === 0 &&
+              messagesRef.current.length > 0 &&
+              Date.now() - lastConnectAt.current < 3000;
+            if (!isTransientEmpty) setMessages(event.messages);
+            else {
+              // Ask for the state again shortly — the runtime may have just
+              // finished restoring after our connect
+              setTimeout(() => {
+                try {
+                  port.postMessage({ type: 'get_state' });
+                } catch {}
+              }, 600);
+            }
             setActivities(event.activities);
             setContext(event.context);
             setApproval(event.pendingApproval as typeof approval);
@@ -231,6 +258,7 @@ export function Sidebar() {
             setCanUndo(event.canUndo);
             syncPing(event.status);
             break;
+          }
           case 'chat_message':
             setMessages((m) => [...m, event.message]);
             break;
@@ -304,7 +332,7 @@ export function Sidebar() {
       // connection is saved there; there is no settings overlay to close.
       if (changes.ba_settings) {
         const s = changes.ba_settings.newValue as Settings | undefined;
-        const ok = Boolean(s?.baseUrl && s?.apiKey && s?.model);
+        const ok = Boolean(s?.model && (s?.subscriptionProvider || (s?.baseUrl && s?.apiKey)));
         setConfigured(ok);
         if (ok) setShowOnboarding(false);
       }

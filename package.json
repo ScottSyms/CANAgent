@@ -14,6 +14,7 @@
     "benchmark:latency": "node scripts/latency-benchmark.ts",
     "benchmark:needle": "node scripts/needle-benchmark.ts",
     "benchmark:graph-build": "node scripts/graph-build-benchmark.ts",
+    "benchmark:ingest": "node scripts/ingest-benchmark.ts",
     "test:e2e": "npm run build && playwright test",
     "test:e2e:headed": "npm run build && playwright test --headed",
     "test:e2e:debug": "npm run build && PWDEBUG=1 playwright test",

@@ -72,6 +72,18 @@ export interface SearchParams {
   chunks: ChunkInput[];
   queryVector: number[];
   k: number;
+  /**
+   * True when `queryVector` is already known to be unit-norm, so
+   * `scoreVectors` can skip a redundant re-normalize. Only set this for a
+   * vector that came straight from the on-device local embedder: its traced
+   * model graph bakes L2 normalization in as one of the model's own ops (see
+   * scripts/convert-litert-embed-model/convert.py), so the raw output is
+   * already unit-norm before it ever reaches this file. Defaults to `false`
+   * (safe): external-provider vectors aren't guaranteed normalized, and
+   * neither is any vector reconstructed via arithmetic (e.g. `dequantizeVector`
+   * output, or an averaged/composited vector) even if its source was local.
+   */
+  queryAlreadyNormalized?: boolean;
 }
 
 /**
@@ -166,15 +178,15 @@ export function setSimdBackend(fn: SimdBackend | null): void {
  * fusion pool should always pass it. Omit `limit` to get the full ranking.
  */
 export function scoreVectors(
-  params: Pick<SearchParams, 'dim' | 'perDimScale' | 'chunkCount' | 'vectors' | 'queryVector'>,
+  params: Pick<SearchParams, 'dim' | 'perDimScale' | 'chunkCount' | 'vectors' | 'queryVector' | 'queryAlreadyNormalized'>,
   limit?: number,
 ): Array<{ i: number; score: number }> {
-  const { dim, perDimScale, chunkCount, vectors, queryVector } = params;
+  const { dim, perDimScale, chunkCount, vectors, queryVector, queryAlreadyNormalized } = params;
   if (chunkCount === 0) return [];
   if (queryVector.length !== dim) {
     throw new Error(`Query embedding dimension ${queryVector.length} does not match repo dimension ${dim}.`);
   }
-  const q = quantizeVector(normalizeVector(queryVector), perDimScale);
+  const q = quantizeVector(queryAlreadyNormalized ? queryVector : normalizeVector(queryVector), perDimScale);
   const qw = new Float32Array(dim);
   for (let d = 0; d < dim; d++) qw[d] = q[d] * perDimScale[d] * perDimScale[d];
 

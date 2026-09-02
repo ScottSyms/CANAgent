@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { TestConnectionResponse } from '../shared/messages';
 import type { ModelProtocol, Settings } from '../shared/types';
+import type { ProviderId } from '../shared/providerIds';
 import { getSettingsForEdit, saveSettings } from '../background/storage';
 import { useT } from '../sidebar/i18n';
 import { Group } from './SettingsControls';
@@ -39,7 +40,9 @@ export function ModelSection() {
     setTestResult(null);
   };
 
-  const valid = Boolean(settings.baseUrl.trim() && settings.apiKey.trim() && settings.model.trim());
+  const valid = settings.subscriptionProvider
+    ? Boolean(settings.model.trim())
+    : Boolean(settings.baseUrl.trim() && settings.apiKey.trim() && settings.model.trim());
 
   const test = async () => {
     setTesting(true);
@@ -69,6 +72,7 @@ export function ModelSection() {
         baseUrl: settings.baseUrl.trim(),
         apiKey: settings.apiKey.trim(),
         model: settings.model.trim(),
+        subscriptionProvider: settings.subscriptionProvider,
         protocol: settings.protocol,
         ideogramApiKey: settings.ideogramApiKey?.trim() || undefined,
         apiVersion: settings.apiVersion?.trim() || undefined,
@@ -91,24 +95,41 @@ export function ModelSection() {
 
       <Group title={t('settings.groupConnection')} desc={t('settings.note')}>
         <label class="field">
-          <span>{t('settings.endpointUrl')}</span>
-          <input
-            type="url"
-            placeholder="https://api.example.com/v1"
-            value={settings.baseUrl}
-            onInput={(e) => update({ baseUrl: (e.target as HTMLInputElement).value })}
-          />
+          <span>Connection type</span>
+          <select
+            value={settings.subscriptionProvider ?? ''}
+            onChange={(e) => update({
+              subscriptionProvider: ((e.target as HTMLSelectElement).value || undefined) as ProviderId | undefined,
+            })}
+          >
+            <option value="">Endpoint / API key</option>
+            <option value="openai-chatgpt">ChatGPT / Codex local companion</option>
+            <option value="github-copilot">GitHub Copilot local companion</option>
+          </select>
+          <span class="field-note">Connect and install subscription providers below before selecting them here.</span>
         </label>
 
-        <label class="field">
-          <span>{t('settings.apiKey')}</span>
-          <input
-            type="password"
-            placeholder="sk-…"
-            value={settings.apiKey}
-            onInput={(e) => update({ apiKey: (e.target as HTMLInputElement).value })}
-          />
-        </label>
+        {!settings.subscriptionProvider && <>
+          <label class="field">
+            <span>{t('settings.endpointUrl')}</span>
+            <input
+              type="url"
+              placeholder="https://api.example.com/v1"
+              value={settings.baseUrl}
+              onInput={(e) => update({ baseUrl: (e.target as HTMLInputElement).value })}
+            />
+          </label>
+
+          <label class="field">
+            <span>{t('settings.apiKey')}</span>
+            <input
+              type="password"
+              placeholder="sk-…"
+              value={settings.apiKey}
+              onInput={(e) => update({ apiKey: (e.target as HTMLInputElement).value })}
+            />
+          </label>
+        </>}
 
         <label class="field">
           <span>{t('settings.model')}</span>
@@ -120,7 +141,7 @@ export function ModelSection() {
           />
         </label>
 
-        <label class="field">
+        {!settings.subscriptionProvider && <label class="field">
           <span>{t('settings.protocol')}</span>
           <select
             value={settings.protocol ?? 'chat-completions'}
@@ -133,9 +154,9 @@ export function ModelSection() {
             ))}
           </select>
           <span class="field-note">{t('settings.protocolNote')}</span>
-        </label>
+        </label>}
 
-        <label class="field">
+        {!settings.subscriptionProvider && <label class="field">
           <span>{t('settings.apiVersion')}</span>
           <input
             type="text"
@@ -144,7 +165,7 @@ export function ModelSection() {
             onInput={(e) => update({ apiVersion: (e.target as HTMLInputElement).value })}
           />
           <span class="field-note">{t('settings.apiVersionNote')}</span>
-        </label>
+        </label>}
       </Group>
 
       <Group title={t('settings.groupImage')} desc={t('settings.groupImageDesc')}>

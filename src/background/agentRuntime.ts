@@ -22,6 +22,7 @@
 // =============================================================================
 
 import type { ApprovalContext } from '../shared/messages';
+import { mapWithConcurrency } from '../shared/asyncPool';
 import type { CapabilityRegistryEntry } from '../shared/capabilities';
 import { resolveAuth } from '../shared/capabilities';
 import { classifyTool, evaluatePolicy, isApprovalStillValid } from '../shared/policy';
@@ -110,6 +111,7 @@ import {
   addSessionApproval,
   clearAllConversations,
   deleteConversation as deleteStoredConversation,
+  getActiveConversationId,
   getActiveProjectId,
   getCapabilities,
   getConversation,
@@ -127,6 +129,7 @@ import {
   saveLessons,
   saveMemoryGraph,
   saveSkills,
+  setActiveConversationId,
   setConversationLabels as setStoredConversationLabels,
   type StoredConversation,
 } from './storage';
@@ -734,7 +737,7 @@ export class AgentRuntime {
     if (!settings) {
       this.emit({
         type: 'error',
-        message: 'No model configured. Open Settings and enter an endpoint, API key, and model first.',
+        message: 'No model configured. Open Settings and choose a connected subscription provider or enter an endpoint, API key, and model.',
       });
       return;
     }
@@ -816,6 +819,7 @@ export class AgentRuntime {
       this.currentConversationSummary = null;
       this.summaryAtCount = 0;
       this.currentConversationLabels = [];
+      void setActiveConversationId(this.currentConversationId);
     }
 
     // Checkpoint the thread BEFORE this turn so "Undo last exchange" can roll it
@@ -1070,6 +1074,7 @@ export class AgentRuntime {
         preview: derivePreview(last?.text ?? ''),
         summary: this.currentConversationSummary ?? undefined,
       });
+      void setActiveConversationId(id);
     } catch {
       // A failed autosave must never break the chat; the next turn retries.
     }
@@ -1116,14 +1121,68 @@ export class AgentRuntime {
    * the model not to assume any prior send/submit/modify completed. Past the cap,
    * or with no model configured, we restore state and let the user drive.
    */
+  /**
+   * Restore the last active (idle) conversation after SW eviction so an idle
+   * panel doesn't appear to have "switched to a new chat". No-op if already
+   * has messages or no active id stored.
+   */
+  async restoreActiveConversation(): Promise<boolean> {
+    if (this.running || this.messages.length > 0 || this.currentConversationId) return false;
+    let id: string | null = null;
+    try {
+      id = await getActiveConversationId();
+    } catch {
+      return false;
+    }
+    if (!id) return false;
+    let record: StoredConversation | null = null;
+    try {
+      record = await getConversation(id);
+    } catch {
+      return false;
+    }
+    if (!record || !record.messages || record.messages.length === 0) return false;
+    // Populate in-memory state directly (cheaper than loadConversation which reopens tabs)
+    this.conversation = record.conversation ?? [];
+    this.messages = record.messages ?? [];
+    this.plan = record.plan ?? null;
+    this.findings = record.findings ?? [];
+    this.lastTaskUrl = record.lastTaskUrl ?? '';
+    this.currentConversationId = record.id;
+    this.currentConversationProjectId = record.projectId;
+    this.conversationCreatedAt = record.createdAt;
+    this.currentConversationLabels = record.labels ?? [];
+    this.currentConversationTitle = record.title || null;
+    this.titleIsAuto = record.autoTitled ?? false;
+    this.currentConversationSummary = record.summary ?? null;
+    this.summaryAtCount = this.messages.length;
+    this.groupName = null;
+    this.groupId = null;
+    this.activities = [];
+    this.pendingSnapshots = [];
+    this.pendingToolImages = [];
+    this.undoStack = [];
+    this.stepsUsed = 0;
+    this.toolCallCount = 0;
+    this.canDistill = false;
+    this.setStatus('idle');
+    return true;
+  }
+
   async recoverInFlight(): Promise<void> {
     let cp;
     try {
       cp = await readCheckpoint();
     } catch {
+      // No checkpoint readable — fall through to idle restore
+      cp = null;
+    }
+    if (!cp) {
+      // No in-flight task: restore the idle conversation so the chat doesn't look blank
+      const restored = await this.restoreActiveConversation();
+      if (restored) this.emit(this.fullState());
       return;
     }
-    if (!cp) return;
     if (this.running) return; // a fresh task already owns the runtime; it clears the checkpoint on settle
     if (cp.unattended) {
       // Unattended runs are re-fired by their scheduled task / trigger, not resumed here.
@@ -1636,6 +1695,7 @@ export class AgentRuntime {
     this.toolCallCount = 0;
     this.canDistill = false;
     this.setStatus('idle');
+    void setActiveConversationId(record.id);
     this.emit({ type: 'plan_update', plan: this.planView() });
     this.emit(this.fullState());
     // Reopen the pages this conversation used so they're queryable again
@@ -1704,6 +1764,12 @@ export class AgentRuntime {
       this.currentConversationSummary = null;
       this.summaryAtCount = 0;
       this.currentConversationLabels = [];
+      void setActiveConversationId(null);
+    } else {
+      // If the deleted id was the persisted active one but not current in-memory (e.g. after eviction), clear it
+      try {
+        if ((await getActiveConversationId()) === id) void setActiveConversationId(null);
+      } catch {}
     }
   }
 
@@ -1780,6 +1846,7 @@ export class AgentRuntime {
   /** Wipe all saved conversations. The on-screen chat is left intact (re-saves on its next turn). */
   async clearConversations(): Promise<void> {
     await clearAllConversations();
+    void setActiveConversationId(null);
   }
 
   stop(): void {
@@ -1891,6 +1958,7 @@ export class AgentRuntime {
     // New conversation ⇒ fresh tab group (old group/tabs are left open).
     this.groupName = null;
     this.groupId = null;
+    void setActiveConversationId(null);
     this.setStatus('idle');
     this.emit({ type: 'plan_update', plan: null });
     this.emit(this.fullState());
@@ -2518,7 +2586,7 @@ export class AgentRuntime {
       .filter((t): t is ScopedSubtaskInput => t !== null);
     if (tasks.length === 0) return 'Error: run_subtasks needs at least one task with an objective.';
     const maxSteps = Math.min(8, Math.max(1, Math.floor(Number(args.maxSteps) || 4)));
-    const results = await this.mapWithConcurrency(tasks, 3, (task) =>
+    const results = await mapWithConcurrency(tasks, 3, (task) =>
       runScopedSubtask(settings, task, {
         maxSteps,
         dispatch: (name, a) => this.dispatchTool(name, a),
@@ -2527,20 +2595,6 @@ export class AgentRuntime {
       }),
     );
     return JSON.stringify({ results });
-  }
-
-  private async mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-    const out = new Array<R>(items.length);
-    let next = 0;
-    const workers = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
-      for (;;) {
-        const i = next++;
-        if (i >= items.length) return;
-        out[i] = await fn(items[i]);
-      }
-    });
-    await Promise.all(workers);
-    return out;
   }
 
   /**
